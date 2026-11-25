@@ -67,6 +67,7 @@ type PluginServer struct {
 	allocAnno                     string
 	toAllocDeviceAnno             string
 	grpcServer                    *grpc.Server
+	wholeGRPC                     *grpc.Server
 	mgr                           manager.Manager
 	socket                        string
 	stopCh                        chan any
@@ -234,6 +235,12 @@ func (ps *PluginServer) Start() error {
 	if ps.enablePeriodicIdleVNPUCleanup {
 		ps.wg.Go(ps.startPeriodicCheckIdleVNPUs)
 	}
+	if mgr, ok := ps.mgr.(mixedDeviceManager); ok && mgr.MixedDevices() != nil {
+		if err := ps.startWholeDieEndpoint(mgr); err != nil {
+			_ = ps.Stop()
+			return err
+		}
+	}
 	ps.wg.Go(ps.watchAndRegister)
 	return nil
 }
@@ -267,6 +274,10 @@ func (ps *PluginServer) Stop() error {
 	if ps.grpcServer != nil {
 		ps.grpcServer.Stop()
 	}
+	if ps.wholeGRPC != nil {
+		ps.wholeGRPC.Stop()
+		_ = os.Remove(ps.wholeDieSocket())
+	}
 	ps.wg.Wait()
 	_ = os.Remove(ps.socket)
 	return nil
@@ -283,6 +294,32 @@ func (ps *PluginServer) CleanupIdleVNPUs() error {
 	result, err := ps.idleVNPUReconciler.Reconcile(context.Background())
 	klog.Infof("idle vNPU reconcile: cards=%d protected=%d reclaimable=%d inspected=%d destroyed=%d skipped=%d ignored=%d unknown=%v destroyErrors=%d resets=%d", result.CardsInspected, result.CardsProtected, result.CardsReclaimable, result.VNPUsInspected, result.VNPUsDestroyed, result.VNPUsSkipped, result.VNPUsIgnored, result.UnknownSnapshot, result.DestroyErrors, result.ConfirmationResets)
 	return err
+}
+
+func (ps *PluginServer) wholeDieSocket() string {
+	return path.Join(path.Dir(ps.socket), "hami-ascend-whole-die.sock")
+}
+
+func (ps *PluginServer) startWholeDieEndpoint(mgr mixedDeviceManager) error {
+	socket := ps.wholeDieSocket()
+	_ = os.Remove(socket)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return err
+	}
+	ps.wholeGRPC = grpc.NewServer()
+	v1beta1.RegisterDevicePluginServer(ps.wholeGRPC, &wholeDieServer{mgr: mgr})
+	ps.wg.Go(func() {
+		if err := ps.wholeGRPC.Serve(listener); err != nil {
+			klog.Errorf("whole-die device plugin: %v", err)
+		}
+	})
+	conn, err := ps.dial(socket, 5*time.Second)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return ps.registerKubeletEndpoint(socket, wholeDieResource)
 }
 
 func (ps *PluginServer) serve() error {

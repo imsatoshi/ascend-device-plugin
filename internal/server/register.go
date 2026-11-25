@@ -60,8 +60,10 @@ func (ps *PluginServer) watchAndRegister() {
 		// restart gets the node out of it.
 		if err := ps.mgr.UpdateDevice(); err != nil {
 			klog.Errorf("update device error: %v", err)
-			timer = time.After(5 * time.Second)
-			continue
+			if mgr, ok := ps.mgr.(mixedDeviceManager); !ok || mgr.MixedDevices() == nil {
+				timer = time.After(5 * time.Second)
+				continue
+			}
 		}
 		// Chips that were still busy when Start() enabled device-share are
 		// re-driven here; the driver accepts the switch once their workloads
@@ -165,6 +167,20 @@ func (ps *PluginServer) registerHAMi() error {
 
 	annos := make(map[string]string)
 	annos[ps.registerAnno] = string(data)
+	if mgr, ok := ps.mgr.(mixedDeviceManager); ok && mgr.MixedDevices() != nil {
+		shared := make(map[string]int32, len(devs))
+		for _, dev := range devs {
+			shared[dev.UUID] = dev.PhyID
+		}
+		state, err := json.Marshal(struct {
+			WholeDieGroups [][]int32        `json:"wholeDieGroups"`
+			Shared         map[string]int32 `json:"shared"`
+		}{mgr.MixedDevices().WholeDieGroups, shared})
+		if err != nil {
+			return err
+		}
+		annos["lingjing.io/ascend-device-ranges"] = string(state)
+	}
 	annos[ps.handshakeAnno] = "Reported_" + time.Now().Add(time.Duration(*reportTimeOffset)*time.Second).Format("2006.01.02 15:04:05")
 
 	if ps.mgr.IsHamiVnpuCore() {
@@ -209,6 +225,10 @@ func (ps *PluginServer) registerKubelet() error {
 	if ps.registerKubeletFunc != nil {
 		return ps.registerKubeletFunc()
 	}
+	return ps.registerKubeletEndpoint(ps.socket, ps.mgr.ResourceName())
+}
+
+func (ps *PluginServer) registerKubeletEndpoint(socket, resource string) error {
 	conn, err := ps.dial(v1beta1.KubeletSocket, 5*time.Second)
 	if err != nil {
 		return err
@@ -219,8 +239,8 @@ func (ps *PluginServer) registerKubelet() error {
 	client := v1beta1.NewRegistrationClient(conn)
 	reqt := &v1beta1.RegisterRequest{
 		Version:      v1beta1.Version,
-		Endpoint:     path.Base(ps.socket),
-		ResourceName: ps.mgr.ResourceName(),
+		Endpoint:     path.Base(socket),
+		ResourceName: resource,
 		Options: &v1beta1.DevicePluginOptions{
 			GetPreferredAllocationAvailable: true,
 		},
