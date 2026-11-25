@@ -58,8 +58,9 @@ func (ps *PluginServer) watchAndRegister() {
 		// was told about at startup — typically all Unhealthy when the plugin
 		// starts before the driver finished initialising — and only a plugin
 		// restart gets the node out of it.
-		if err := ps.mgr.UpdateDevice(); err != nil {
-			klog.Errorf("update device error: %v", err)
+		refreshErr := ps.mgr.UpdateDevice()
+		if refreshErr != nil {
+			klog.Errorf("update device error: %v", refreshErr)
 			if mgr, ok := ps.mgr.(mixedDeviceManager); !ok || mgr.MixedDevices() == nil {
 				timer = time.After(5 * time.Second)
 				continue
@@ -87,6 +88,8 @@ func (ps *PluginServer) watchAndRegister() {
 		err := ps.registerHAMi()
 		if err != nil {
 			klog.Errorf("register HAMi error: %v", err)
+			timer = time.After(5 * time.Second)
+		} else if refreshErr != nil {
 			timer = time.After(5 * time.Second)
 		} else {
 			klog.V(3).Infof("register HAMi success")

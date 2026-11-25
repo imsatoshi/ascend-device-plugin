@@ -77,6 +77,24 @@ func (am *AscendManager) validateMixedMode() error {
 	return nil
 }
 
+// PartialDeviceRefreshError means the partition was validated and published,
+// with the affected dies marked unavailable.
+type PartialDeviceRefreshError struct{ error }
+
+func (err *PartialDeviceRefreshError) Unwrap() error { return err.error }
+
+func (am *AscendManager) mixedDevicesByLogicID() map[int32]*Device {
+	am.mu.RLock()
+	defer am.mu.RUnlock()
+	known := make(map[int32]*Device, len(am.devs)+len(am.wholeDevs))
+	for _, devices := range [][]*Device{am.wholeDevs, am.devs} {
+		for _, dev := range devices {
+			known[dev.LogicID] = dev
+		}
+	}
+	return known
+}
+
 func (am *AscendManager) markMixedUnhealthy() {
 	am.mu.Lock()
 	defer am.mu.Unlock()

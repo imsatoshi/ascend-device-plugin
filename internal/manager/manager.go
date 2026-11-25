@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -249,15 +250,8 @@ func (am *AscendManager) VDeviceCount() int {
 	return int(am.config.MemoryAllocatable / am.config.Templates[0].Memory)
 }
 
-func (am *AscendManager) UpdateDevice() (err error) {
+func (am *AscendManager) UpdateDevice() error {
 	mixed := am.MixedDevices()
-	if mixed != nil {
-		defer func() {
-			if err != nil {
-				am.markMixedUnhealthy()
-			}
-		}()
-	}
 	if am.v2Mgr != nil {
 		devices, _, err := am.v2Mgr.discover(am.config)
 		if err != nil {
@@ -289,56 +283,65 @@ func (am *AscendManager) UpdateDevice() (err error) {
 	}
 	_, IDs, err := am.mgr.GetDeviceList()
 	if err != nil {
-		klog.Errorf("failed to get device list: %v", err)
-		return err
+		if mixed != nil {
+			am.markMixedUnhealthy()
+		}
+		return fmt.Errorf("get device list: %w", err)
 	}
 
+	var known map[int32]*Device
+	if mixed != nil {
+		known = am.mixedDevicesByLogicID()
+	}
+	var dieErrors []error
 	newDevs := make([]*Device, 0, len(IDs))
-	for _, ID := range IDs {
-		phyID, err := am.mgr.GetPhysicIDFromLogicID(ID)
+	for _, id := range IDs {
+		dev, err := am.readDeviceIdentity(id)
 		if err != nil {
-			klog.Errorf("failed to get physic id from logic id: %v", err)
-			return err
-		}
-		cardID, deviceID, err := am.mgr.GetCardIDDeviceID(ID)
-		if err != nil {
-			klog.Errorf("failed to get card id from device id: %v", err)
-			return err
-		}
-		uuid, err := am.mgr.GetDieID(ID, dcmi.VDIE)
-		if err != nil {
-			klog.Errorf("failed to get uuid from device id: %v", err)
-			return err
-		}
-		if am.shouldIgnoreDevice(uuid, cardID) {
-			klog.V(4).Infof("ignore device matched filterDevices uuid=%s index=%d logicID=%d phyID=%d deviceID=%d", uuid, cardID, ID, phyID, deviceID)
+			// A known die retains its last validated identity but is unavailable
+			// until DCMI can confirm it again. Unknown membership fails closed.
+			previous := known[id]
+			if previous == nil {
+				if mixed != nil {
+					am.markMixedUnhealthy()
+				}
+				return err
+			}
+			dev = *previous
+			dev.Health = false
+			dieErrors = append(dieErrors, err)
+			newDevs = append(newDevs, &dev)
 			continue
 		}
-		health, err := am.mgr.GetDeviceHealth(ID)
-		if err != nil {
-			klog.Errorf("failed to get device health: %v", err)
-			return err
+		if am.shouldIgnoreDevice(dev.UUID, dev.CardID) {
+			klog.V(4).Infof("ignore Ascend device matched filterDevices uuid=%s index=%d logicID=%d phyID=%d deviceID=%d",
+				dev.UUID, dev.CardID, id, dev.PhyID, dev.DeviceID)
+			continue
 		}
-		newDevs = append(newDevs, &Device{
-			UUID:     uuid,
-			LogicID:  ID,
-			PhyID:    phyID,
-			CardID:   cardID,
-			DeviceID: deviceID,
-			Memory:   am.config.MemoryAllocatable,
-			AICore:   am.config.AICore,
-			Health:   health == 0,
-		})
+		health, err := am.mgr.GetDeviceHealth(id)
+		if err != nil {
+			err = fmt.Errorf("get health of logical die %d: %w", id, err)
+			if mixed == nil {
+				return err
+			}
+			dieErrors = append(dieErrors, err)
+		}
+		dev.Health = err == nil && health == 0
+		newDevs = append(newDevs, &dev)
 	}
 	var whole []*Device
 	if mixed != nil {
 		whole, newDevs, err = partitionDies(mixed, newDevs)
 		if err != nil {
+			am.markMixedUnhealthy()
 			return err
 		}
 		for _, dev := range whole {
+			if !dev.Health {
+				continue
+			}
 			if err := am.CheckWholeDie(dev); err != nil {
-				klog.Warningf("withholding whole die: %v", err)
+				dieErrors = append(dieErrors, err)
 				dev.Health = false
 			}
 		}
@@ -347,7 +350,29 @@ func (am *AscendManager) UpdateDevice() (err error) {
 	am.wholeDevs = whole
 	am.devs = newDevs
 	am.mu.Unlock()
+	if err := errors.Join(dieErrors...); err != nil {
+		return &PartialDeviceRefreshError{err}
+	}
 	return nil
+}
+
+func (am *AscendManager) readDeviceIdentity(id int32) (Device, error) {
+	phyID, err := am.mgr.GetPhysicIDFromLogicID(id)
+	if err != nil {
+		return Device{}, fmt.Errorf("get physical ID of logical die %d: %w", id, err)
+	}
+	cardID, deviceID, err := am.mgr.GetCardIDDeviceID(id)
+	if err != nil {
+		return Device{}, fmt.Errorf("get card/device ID of logical die %d: %w", id, err)
+	}
+	uuid, err := am.mgr.GetDieID(id, dcmi.VDIE)
+	if err != nil {
+		return Device{}, fmt.Errorf("get UUID of logical die %d: %w", id, err)
+	}
+	return Device{
+		UUID: uuid, LogicID: id, PhyID: phyID, CardID: cardID, DeviceID: deviceID,
+		Memory: am.config.MemoryAllocatable, AICore: am.config.AICore,
+	}, nil
 }
 
 func (am *AscendManager) GetDevices() []*Device {

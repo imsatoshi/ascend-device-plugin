@@ -18,6 +18,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -213,7 +214,11 @@ func (ps *PluginServer) Start() error {
 
 	err := ps.mgr.UpdateDevice()
 	if err != nil {
-		return err
+		var partial *manager.PartialDeviceRefreshError
+		if !errors.As(err, &partial) {
+			return err
+		}
+		klog.Warningf("starting with unhealthy Ascend dies: %v", partial)
 	}
 	if err := ps.enableNodeDeviceShare(); err != nil {
 		return err
