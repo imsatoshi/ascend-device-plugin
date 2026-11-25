@@ -220,3 +220,24 @@ func TestMixedWholeEndpointStart(t *testing.T) {
 		t.Fatalf("whole socket did not publish health for both dies: %v (%v)", update, err)
 	}
 }
+
+func TestWhole910B3AllocatesPhysicalIDsFromCardIDGroup(t *testing.T) {
+	mgr := &mixedManagerFixture{config: internal.MixedDevices{
+		IDSource: "cardID", WholeDieGroups: [][]int32{{0, 1, 2, 3}}, SharedDies: []int32{4, 5, 6, 7},
+	}}
+	for card := int32(0); card < 4; card++ {
+		mgr.whole = append(mgr.whole, &manager.Device{CardID: card, PhyID: 7 - card, Health: true})
+	}
+	server := &wholeDieServer{mgr: mgr}
+	response, err := server.Allocate(context.Background(), &plugin.AllocateRequest{
+		ContainerRequests: []*plugin.ContainerAllocateRequest{{DevicesIds: []string{
+			"Ascend910-7", "Ascend910-6", "Ascend910-5", "Ascend910-4",
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response.ContainerResponses[0].Envs["ASCEND_VISIBLE_DEVICES"]; got != "4,5,6,7" {
+		t.Fatalf("want runtime PhyIDs 4,5,6,7, got %s", got)
+	}
+}

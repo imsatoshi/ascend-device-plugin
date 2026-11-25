@@ -153,3 +153,34 @@ func TestMixedCleanupGuard(t *testing.T) {
 		t.Fatalf("only shared die can be cleaned: %v", driver.destroyed)
 	}
 }
+
+func TestConfiguredMixedSharedResource(t *testing.T) {
+	for _, resource := range []string{"Ascend910C", "Ascend910B3"} {
+		t.Run(resource, func(t *testing.T) {
+			am := newMixedTestManager(&mixedTestDriver{})
+			am.nodeConfig.VDeviceCount = 4
+			am.config.CommonWord = resource
+			am.config.ResourceName = "huawei.com/" + resource
+			am.nodeConfig.MixedDevices.SharedResourceName = am.config.ResourceName
+			if err := am.validateMixedMode(); err != nil {
+				t.Fatal(err)
+			}
+			am.nodeConfig.MixedDevices.SharedResourceName = "huawei.com/Ascend910"
+			if err := am.validateMixedMode(); err == nil {
+				t.Fatal("mixed shared resource overlaps whole endpoint")
+			}
+		})
+	}
+}
+
+func TestMixed910B3UsesCardIDForPartition(t *testing.T) {
+	cfg := &internal.MixedDevices{IDSource: "cardID", WholeDieGroups: [][]int32{{0, 1, 2, 3}}, SharedDies: []int32{4, 5, 6, 7}}
+	var devices []*Device
+	for card := int32(0); card < 8; card++ {
+		devices = append(devices, &Device{CardID: card, PhyID: 7 - card, UUID: fmt.Sprint(card)})
+	}
+	whole, shared, err := partitionDies(cfg, devices)
+	if err != nil || len(whole) != 4 || len(shared) != 4 || whole[0].PhyID != 7 || shared[0].PhyID != 3 {
+		t.Fatalf("910B3 partition did not follow CardID: whole=%v shared=%v err=%v", whole, shared, err)
+	}
+}

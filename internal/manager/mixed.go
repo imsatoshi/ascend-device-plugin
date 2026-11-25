@@ -2,11 +2,12 @@ package manager
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/Project-HAMi/ascend-device-plugin/internal"
 )
 
-// partitionDies uses physical die IDs. DCMI CardID identifies a dual-die
+// DCMI CardID identifies a dual-die
 // module on A3 and may not straddle an allocation group under UNION_POLICY.
 func partitionDies(config *internal.MixedDevices, devices []*Device) (whole, shared []*Device, err error) {
 	if len(config.WholeDieGroups) == 0 || len(config.SharedDies) == 0 {
@@ -28,11 +29,12 @@ func partitionDies(config *internal.MixedDevices, devices []*Device) (whole, sha
 	physical := make(map[int32]bool)
 	uuids := make(map[string]bool)
 	for _, dev := range devices {
-		group, ok := groups[dev.PhyID]
-		if !ok || physical[dev.PhyID] || dev.UUID == "" || uuids[dev.UUID] {
-			return nil, nil, fmt.Errorf("unexpected or duplicate die %d (%s)", dev.PhyID, dev.UUID)
+		id := dev.PartitionID(config)
+		group, ok := groups[id]
+		if !ok || physical[id] || dev.UUID == "" || uuids[dev.UUID] {
+			return nil, nil, fmt.Errorf("unexpected or duplicate die %d (%s)", id, dev.UUID)
 		}
-		physical[dev.PhyID], uuids[dev.UUID] = true, true
+		physical[id], uuids[dev.UUID] = true, true
 		if prior, exists := boards[dev.CardID]; exists && prior != group {
 			return nil, nil, fmt.Errorf("DCMI card %d spans die groups", dev.CardID)
 		}
@@ -47,6 +49,15 @@ func partitionDies(config *internal.MixedDevices, devices []*Device) (whole, sha
 		return nil, nil, fmt.Errorf("declared %d dies, discovered %d", len(groups), len(physical))
 	}
 	return whole, shared, nil
+}
+
+// PartitionID selects the configured DCMI coordinate. The runtime still
+// uses PhyID for device IDs and ASCEND_VISIBLE_DEVICES.
+func (dev *Device) PartitionID(config *internal.MixedDevices) int32 {
+	if config.IDSource == "cardID" {
+		return dev.CardID
+	}
+	return dev.PhyID
 }
 
 func (am *AscendManager) MixedDevices() *internal.MixedDevices {
@@ -70,11 +81,31 @@ func (am *AscendManager) validateMixedMode() error {
 	if err != nil {
 		return err
 	}
-	if am.CommonWord() != "Ascend910C" || am.ResourceName() != "huawei.com/Ascend910C" ||
+	mixed := am.MixedDevices()
+	if mixed.IDSource != "" && mixed.IDSource != "phyID" && mixed.IDSource != "cardID" {
+		return fmt.Errorf("unknown mixed-device DCMI ID source %q", mixed.IDSource)
+	}
+	resource := mixed.SharedResourceName
+	if resource == "" {
+		resource = "huawei.com/Ascend910C" // Existing mixed site files omit this field.
+	}
+	if am.v2Mgr != nil || resource == "huawei.com/Ascend910" || resource != am.ResourceName() ||
+		resource != "huawei.com/"+am.CommonWord() ||
 		mode != internal.VNPUModeTemplate || am.VDeviceCount() != 4 || !am.nodeConfig.FilterDevices.IsEmpty() {
-		return fmt.Errorf("mixed devices require Ascend910C four-slot template mode and an explicit partition without filterDevices")
+		return fmt.Errorf("mixed devices require the configured shared resource in four-slot template mode without filterDevices")
 	}
 	return nil
+}
+
+func (am *AscendManager) isMixedSharedDevice(logicID int32) bool {
+	mixed := am.MixedDevices()
+	if mixed.IDSource == "cardID" {
+		cardID, _, err := am.mgr.GetCardIDDeviceID(logicID)
+		return err == nil && slices.Contains(mixed.SharedDies, cardID)
+	}
+	phyID, err := am.mgr.GetPhysicIDFromLogicID(logicID)
+	return err == nil && slices.Contains(mixed.SharedDies, phyID)
+
 }
 
 // PartialDeviceRefreshError means the partition was validated and published,
