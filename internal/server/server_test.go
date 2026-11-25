@@ -119,6 +119,7 @@ func setupAllocateEnv(nodeName, podName, podNamespace string, numContainers int,
 			Containers: containers,
 		},
 	}
+	pod.Status.Phase = v1.PodPending
 	cleanup := setupFakeClient([]*v1.Pod{pod}, []*v1.Node{node})
 	return node, pod, cleanup
 }

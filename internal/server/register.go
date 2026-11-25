@@ -222,7 +222,7 @@ func (ps *PluginServer) registerKubelet() error {
 		Endpoint:     path.Base(ps.socket),
 		ResourceName: ps.mgr.ResourceName(),
 		Options: &v1beta1.DevicePluginOptions{
-			GetPreferredAllocationAvailable: false,
+			GetPreferredAllocationAvailable: true,
 		},
 	}
 

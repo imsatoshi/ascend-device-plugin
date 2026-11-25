@@ -58,7 +58,7 @@ func TestAllocateENPUSlotsFollowSelectedPhysicalDevice(t *testing.T) {
 	devices := device.EncodePodSingleDevice(device.PodSingleDevice{{cd(selected.UUID, testCommonWord, int32(memory), core)}})
 	slots := make(map[int]bool)
 	var previous *v1.Pod
-	for i, requestedID := range []string{"die-a-3", "die-b-3"} {
+	for i, requestedID := range []string{"selected-die-0", "selected-die-1"} {
 		_, pod, cleanup := setupAllocateEnv(ps.nodeName, fmt.Sprintf("pod-%d", i), "default", 1, nil)
 		t.Cleanup(cleanup)
 		if previous != nil {
