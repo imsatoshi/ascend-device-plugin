@@ -179,6 +179,13 @@ func LoadConfig(path string) (*Config, error) {
 	return &Config{VNPUs: VNPUsConfig{HamiVnpuCore: legacy.HamiVnpuCore, Configs: legacy.VNPUs}}, nil
 }
 
+// MixedDevices pins the whole-die HCCS groups and the template pool to
+// physical die IDs. Every discovered die must belong to exactly one group.
+type MixedDevices struct {
+	WholeDieGroups [][]int32 `json:"wholeDieGroups" yaml:"wholeDieGroups"`
+	SharedDies     []int32   `json:"sharedDies" yaml:"sharedDies"`
+}
+
 type NodeConfig struct {
 	Name           string `json:"name" yaml:"name"`
 	HamiVnpuMode   string `json:"hamiVnpuMode,omitempty" yaml:"hamiVnpuMode,omitempty"`
@@ -187,6 +194,7 @@ type NodeConfig struct {
 	HamiVnpuCore      *bool         `json:"hami-vnpu-core,omitempty" yaml:"hami-vnpu-core,omitempty"`
 	VDeviceCount      int           `json:"vDeviceCount" yaml:"vDeviceCount"`
 	DeviceCoreScaling float64       `json:"deviceCoreScaling,omitempty" yaml:"deviceCoreScaling,omitempty"`
+	MixedDevices      *MixedDevices `json:"mixedDevices,omitempty" yaml:"mixedDevices,omitempty"`
 	FilterDevices     FilterDevices `json:"filterDevices,omitempty" yaml:"filterDevices,omitempty"`
 }
 

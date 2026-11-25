@@ -37,6 +37,12 @@ func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName stri
 		if d == nil {
 			return nil, fmt.Errorf("unknown uuid: %s", dev.UUID)
 		}
+		if mgr, ok := ps.mgr.(mixedDeviceManager); ok && mgr.MixedDevices() != nil {
+			if !d.Health || len(containerDevs) != 1 || rtInfoLookup[dev.UUID].Temp != "vir05_1c_16g" ||
+				(pod.Annotations[VNPUModeAnnotation] != "" && pod.Annotations[VNPUModeAnnotation] != VNPUModeTemplate) {
+				return nil, fmt.Errorf("mixed shared pool requires one healthy die and the vir05_1c_16g template")
+			}
+		}
 		IDs = append(IDs, d.PhyID)
 
 		if info, ok := rtInfoLookup[dev.UUID]; ok {

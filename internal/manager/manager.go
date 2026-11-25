@@ -18,6 +18,7 @@ package manager
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -79,6 +80,7 @@ type AscendManager struct {
 	config       internal.VNPUConfig
 	globalConfig internal.Config
 	devs         []*Device
+	wholeDevs    []*Device
 	nodeConfig   *internal.NodeConfig
 }
 
@@ -197,6 +199,9 @@ func (am *AscendManager) LoadConfig(path string) error {
 // ValidateWholeCardMode checks the effective vNPU mode after global and node
 // configuration have both been loaded.
 func (am *AscendManager) ValidateWholeCardMode() error {
+	if err := am.validateMixedMode(); err != nil {
+		return err
+	}
 	if am.v2Mgr == nil {
 		return nil
 	}
@@ -244,7 +249,15 @@ func (am *AscendManager) VDeviceCount() int {
 	return int(am.config.MemoryAllocatable / am.config.Templates[0].Memory)
 }
 
-func (am *AscendManager) UpdateDevice() error {
+func (am *AscendManager) UpdateDevice() (err error) {
+	mixed := am.MixedDevices()
+	if mixed != nil {
+		defer func() {
+			if err != nil {
+				am.markMixedUnhealthy()
+			}
+		}()
+	}
 	if am.v2Mgr != nil {
 		devices, _, err := am.v2Mgr.discover(am.config)
 		if err != nil {
@@ -317,7 +330,21 @@ func (am *AscendManager) UpdateDevice() error {
 			Health:   health == 0,
 		})
 	}
+	var whole []*Device
+	if mixed != nil {
+		whole, newDevs, err = partitionDies(mixed, newDevs)
+		if err != nil {
+			return err
+		}
+		for _, dev := range whole {
+			if err := am.CheckWholeDie(dev); err != nil {
+				klog.Warningf("withholding whole die: %v", err)
+				dev.Health = false
+			}
+		}
+	}
 	am.mu.Lock()
+	am.wholeDevs = whole
 	am.devs = newDevs
 	am.mu.Unlock()
 	return nil
@@ -372,6 +399,10 @@ func (am *AscendManager) ListVirtualDevices(logicID int32) ([]VirtualDevice, err
 }
 
 func (am *AscendManager) shouldIgnoreDeviceForCleanup(logicID, cardID int32) bool {
+	if mixed := am.MixedDevices(); mixed != nil {
+		physical, err := am.mgr.GetPhysicIDFromLogicID(logicID)
+		return err != nil || !slices.Contains(mixed.SharedDies, physical)
+	}
 	if !am.shouldCheckIgnored() {
 		return false
 	}
@@ -393,6 +424,12 @@ func (am *AscendManager) shouldIgnoreDeviceForCleanup(logicID, cardID int32) boo
 func (am *AscendManager) DestroyVirtualDevice(logicID int32, vdevID uint32) error {
 	if am.v2Mgr != nil {
 		return fmt.Errorf("%s uses whole-card allocation and has no virtual devices", ascend950DTName)
+	}
+	if mixed := am.MixedDevices(); mixed != nil {
+		physical, err := am.mgr.GetPhysicIDFromLogicID(logicID)
+		if err != nil || !slices.Contains(mixed.SharedDies, physical) {
+			return fmt.Errorf("refusing vNPU cleanup outside shared dies: logical ID %d", logicID)
+		}
 	}
 	return am.mgr.DestroyVirtualDevice(logicID, vdevID)
 }
@@ -517,16 +554,8 @@ func (am *AscendManager) CleanupIdleVNPUs() error {
 			klog.Warningf("failed to get card/device ID for logic ID %d: %v", logicID, err)
 			continue
 		}
-		uuid := ""
-		if am.shouldCheckIgnored() && am.nodeConfig.FilterDevices.HasUUID() {
-			uuid, err = am.mgr.GetDieID(logicID, dcmi.VDIE)
-			if err != nil {
-				klog.Warningf("failed to get uuid for logic ID %d: %v", logicID, err)
-				continue
-			}
-		}
-		if am.shouldIgnoreDevice(uuid, cardID) {
-			klog.V(4).Infof("skip cleanup on ignored device uuid=%s index=%d logicID=%d deviceID=%d", uuid, cardID, logicID, deviceID)
+		if am.shouldIgnoreDeviceForCleanup(logicID, cardID) {
+			klog.V(4).Infof("skip cleanup on ignored device index=%d logicID=%d deviceID=%d", cardID, logicID, deviceID)
 			continue
 		}
 		// Obtain all vNPU information on this device
@@ -545,7 +574,7 @@ func (am *AscendManager) CleanupIdleVNPUs() error {
 				klog.V(1).Infof("Found idle vNPU: cardID=%d, deviceID=%d, vnpuID=%d, status=%d, template=%s,IsContainerUsed=%d",
 					cardID, deviceID, vDev.VDevID, vDev.QueryInfo.Status, vDev.QueryInfo.Name, vDev.QueryInfo.IsContainerUsed)
 
-				err := am.mgr.DestroyVirtualDevice(logicID, uint32(vDev.VDevID))
+				err := am.DestroyVirtualDevice(logicID, uint32(vDev.VDevID))
 				if err != nil {
 					klog.Errorf("failed to destroy vNPU %d on device %d: %v", vDev.VDevID, logicID, err)
 				} else {
