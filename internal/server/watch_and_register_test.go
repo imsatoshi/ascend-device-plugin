@@ -19,10 +19,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"google.golang.org/grpc"
@@ -359,4 +361,44 @@ func TestSoftSliceCapacityRegistration(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMixedRefreshPublishesAndRetriesAfterFiveSeconds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cache := newCachingFakeManager(fakeDevices(1, true)...)
+		ps := newWatchRegisterServer(t, cache)
+		ps.mgr = &mixedManagerFixture{FakeManager: cache.FakeManager}
+		ps.healthCh = make(chan int32, 1)
+		update := cache.UpdateDeviceFunc
+		cache.UpdateDeviceFunc = func() error {
+			if err := update(); err != nil {
+				return err
+			}
+			if cache.updates.Load() == 1 {
+				return errors.New("transient DCMI error")
+			}
+			return nil
+		}
+		cache.setHardware(fakeDevices(1, false)...)
+		go ps.watchAndRegister()
+		defer close(ps.stopCh)
+
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if len(ps.healthCh) != 1 || registeredDevices(t, ps)[0].Health {
+			t.Fatal("mixed refresh error must be published to kubelet and HAMi before retry")
+		}
+		<-ps.healthCh
+		cache.setHardware(fakeDevices(1, true)...)
+		time.Sleep(5*time.Second - time.Nanosecond)
+		synctest.Wait()
+		if cache.updates.Load() != 1 {
+			t.Fatalf("unexpected retry before 5s: %d refreshes", cache.updates.Load())
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if cache.updates.Load() != 2 || len(ps.healthCh) != 1 || !registeredDevices(t, ps)[0].Health {
+			t.Fatal("healthy die must be republished on the 5s retry")
+		}
+	})
 }

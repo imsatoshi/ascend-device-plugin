@@ -78,44 +78,89 @@ func (s *wholeDieServer) selectGroup(available, required []string, count int) ([
 	if count <= 0 || len(required) > count {
 		return nil, fmt.Errorf("invalid whole-die allocation size %d", count)
 	}
-	healthy := make(map[string]bool)
-	for _, d := range s.devices() {
-		healthy[d.ID] = d.Health == plugin.Healthy
+	healthy := make(map[string]*manager.Device)
+	for _, die := range s.mgr.WholeDevices() {
+		if die.Health {
+			healthy[wholeDieID(die.PhyID)] = die
+		}
 	}
+	var best []string
+	bestFree := len(available) + 1
+	bestSize := 0
 	for _, group := range s.mgr.MixedDevices().WholeDieGroups {
-		eligible := make(map[string]bool)
+		var eligible []string
 		for _, phy := range group {
 			id := wholeDieID(phy)
-			if healthy[id] && slices.Contains(available, id) {
-				eligible[id] = true
+			if healthy[id] != nil && slices.Contains(available, id) {
+				eligible = append(eligible, id)
 			}
 		}
-		if len(eligible) < count {
+		if len(eligible) < count || len(eligible) > bestFree ||
+			(len(eligible) == bestFree && len(group) >= bestSize) {
 			continue
 		}
-		ids := make([]string, 0, count)
+		remaining := slices.Clone(eligible)
 		for _, id := range required {
-			if !eligible[id] {
+			i := slices.Index(remaining, id)
+			if i < 0 {
 				break
 			}
-			ids = append(ids, id)
-			delete(eligible, id)
+			remaining = slices.Delete(remaining, i, i+1)
 		}
-		if len(ids) != len(required) {
+		if len(remaining) != len(eligible)-len(required) {
 			continue
 		}
-		for _, phy := range group {
-			id := wholeDieID(phy)
-			if len(ids) == count {
-				break
-			}
-			if eligible[id] {
-				ids = append(ids, id)
-			}
-		}
-		return ids, nil
+		best = fillFromModules(required, remaining, count, healthy)
+		bestFree, bestSize = len(eligible), len(group)
+	}
+	if best != nil {
+		return best, nil
 	}
 	return nil, fmt.Errorf("no single HCCS group can satisfy the whole-die allocation")
+}
+
+// Finish partially allocated modules, then use full pairs and spare dies.
+// Split a healthy pair only when the requested count requires it.
+func fillFromModules(required, available []string, count int, devices map[string]*manager.Device) []string {
+	selected := slices.Clone(required)
+	take := func(ids ...string) {
+		if len(selected)+len(ids) <= count {
+			selected = append(selected, ids...)
+		}
+	}
+	requiredModules := make(map[int32]bool)
+	for _, id := range required {
+		requiredModules[devices[id].CardID] = true
+	}
+	modules := make(map[int32][]string)
+	var order []int32
+	for _, id := range available {
+		card := devices[id].CardID
+		if requiredModules[card] {
+			take(id)
+			continue
+		}
+		if len(modules[card]) == 0 {
+			order = append(order, card)
+		}
+		modules[card] = append(modules[card], id)
+	}
+	var spare, deferred []string
+	for _, card := range order {
+		ids := modules[card]
+		switch {
+		case len(ids) == 1:
+			spare = append(spare, ids...)
+		case len(selected)+len(ids) <= count:
+			take(ids...)
+		default:
+			deferred = append(deferred, ids...)
+		}
+	}
+	for _, id := range append(spare, deferred...) {
+		take(id)
+	}
+	return selected
 }
 
 func (s *wholeDieServer) GetPreferredAllocation(_ context.Context, req *plugin.PreferredAllocationRequest) (*plugin.PreferredAllocationResponse, error) {
