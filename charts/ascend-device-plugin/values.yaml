@@ -242,6 +242,19 @@ deviceConfig: |- # @schema required:true
       memoryCapacity: 65536
       aiCore: 20
       aiCPU: 7
+      templates:
+        - name: vir05_1c_16g
+          memory: 16384
+          aiCore: 5
+          aiCPU: 1
+        - name: vir10_3c_32g
+          memory: 32768
+          aiCore: 10
+          aiCPU: 3
+        - name: vir20_6c_64g
+          memory: 65536
+          aiCore: 20
+          aiCPU: 6
     - chipName: Ascend950DT
       commonWord: Ascend950DT
       resourceName: huawei.com/Ascend950DT

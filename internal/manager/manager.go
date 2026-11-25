@@ -167,6 +167,16 @@ func (am *AscendManager) LoadConfig(path string) error {
 			break
 		}
 	}
+	// Older chart configurations use the DCMI name Ascend910 for 910C.
+	// Keep an exact match first and restrict the alias to the 910C entry.
+	if idx == -1 && (chipInfo.Name == "910C" || chipInfo.Name == "Ascend910C") {
+		for i, vnpu := range config.VNPUs.Configs {
+			if vnpu.ChipName == "Ascend910" && vnpu.CommonWord == "Ascend910C" {
+				idx = i
+				break
+			}
+		}
+	}
 	if idx == -1 {
 		return fmt.Errorf("can not find vnpu config for chip %s", chipInfo.Name)
 	}

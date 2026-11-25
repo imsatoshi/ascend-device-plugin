@@ -20,6 +20,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sigs.k8s.io/yaml"
+	"slices"
 	"strings"
 	"testing"
 
@@ -521,4 +523,43 @@ func (d *cleanupFilterDeviceManager) GetVirtualDeviceInfo(int32) (common.Virtual
 func (d *cleanupFilterDeviceManager) GetDieID(int32, dcmi.DieType) (string, error) {
 	d.uuidCalls++
 	return d.uuid, d.uuidErr
+}
+
+func TestAscend910CHardTemplates(t *testing.T) {
+	values, err := os.ReadFile("../../charts/ascend-device-plugin/values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chart struct {
+		DeviceConfig string `json:"deviceConfig"`
+	}
+	if err := yaml.Unmarshal(values, &chart); err != nil {
+		t.Fatal(err)
+	}
+	// The chart places the mode settings before the shared device geometry.
+	_, configs, ok := strings.Cut(chart.DeviceConfig, "  configs:\n")
+	if !ok {
+		t.Fatal("chart deviceConfig has no configs")
+	}
+	chartConfig := "vnpus:\n  hamiVnpuMode: template\n  configs:\n" + configs
+
+	for _, name := range []string{"Ascend910", "910C", "Ascend910C"} {
+		t.Run(name, func(t *testing.T) {
+			am := &AscendManager{mgr: &chipInfoDeviceManager{chipName: name}}
+			if err := am.LoadConfig(writeConfig(t, chartConfig)); err != nil {
+				t.Fatal(err)
+			}
+			if am.CommonWord() != "Ascend910C" || am.ResourceName() != "huawei.com/Ascend910C" || am.VDeviceCount() != 4 {
+				t.Fatalf("chip selected %s/%s with %d slots per die", am.CommonWord(), am.ResourceName(), am.VDeviceCount())
+			}
+			want := []internal.Template{
+				{Name: "vir05_1c_16g", Memory: 16384, AICore: 5, AICPU: 1},
+				{Name: "vir10_3c_32g", Memory: 32768, AICore: 10, AICPU: 3},
+				{Name: "vir20_6c_64g", Memory: 65536, AICore: 20, AICPU: 6},
+			}
+			if !slices.Equal(am.config.Templates, want) {
+				t.Fatalf("templates = %+v", am.config.Templates)
+			}
+		})
+	}
 }
