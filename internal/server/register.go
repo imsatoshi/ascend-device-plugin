@@ -173,7 +173,7 @@ func (ps *PluginServer) registerHAMi() error {
 	if mgr, ok := ps.mgr.(mixedDeviceManager); ok && mgr.MixedDevices() != nil {
 		shared := make(map[string]int32, len(devs))
 		for _, dev := range devs {
-			shared[dev.UUID] = dev.PhyID
+			shared[dev.UUID] = dev.PartitionID(mgr.MixedDevices())
 		}
 		state, err := json.Marshal(struct {
 			WholeDieGroups [][]int32        `json:"wholeDieGroups"`

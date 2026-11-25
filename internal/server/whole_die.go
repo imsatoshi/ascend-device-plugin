@@ -79,18 +79,22 @@ func (s *wholeDieServer) selectGroup(available, required []string, count int) ([
 		return nil, fmt.Errorf("invalid whole-die allocation size %d", count)
 	}
 	healthy := make(map[string]*manager.Device)
+	config := s.mgr.MixedDevices()
+	ids := make(map[int32]string)
 	for _, die := range s.mgr.WholeDevices() {
 		if die.Health {
-			healthy[wholeDieID(die.PhyID)] = die
+			id := wholeDieID(die.PhyID)
+			healthy[id] = die
+			ids[die.PartitionID(config)] = id
 		}
 	}
 	var best []string
 	bestFree := len(available) + 1
 	bestSize := 0
-	for _, group := range s.mgr.MixedDevices().WholeDieGroups {
+	for _, group := range config.WholeDieGroups {
 		var eligible []string
-		for _, phy := range group {
-			id := wholeDieID(phy)
+		for _, partitionID := range group {
+			id := ids[partitionID]
 			if healthy[id] != nil && slices.Contains(available, id) {
 				eligible = append(eligible, id)
 			}

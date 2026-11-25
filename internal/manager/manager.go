@@ -19,7 +19,6 @@ package manager
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -424,9 +423,8 @@ func (am *AscendManager) ListVirtualDevices(logicID int32) ([]VirtualDevice, err
 }
 
 func (am *AscendManager) shouldIgnoreDeviceForCleanup(logicID, cardID int32) bool {
-	if mixed := am.MixedDevices(); mixed != nil {
-		physical, err := am.mgr.GetPhysicIDFromLogicID(logicID)
-		return err != nil || !slices.Contains(mixed.SharedDies, physical)
+	if am.MixedDevices() != nil {
+		return !am.isMixedSharedDevice(logicID)
 	}
 	if !am.shouldCheckIgnored() {
 		return false
@@ -450,11 +448,8 @@ func (am *AscendManager) DestroyVirtualDevice(logicID int32, vdevID uint32) erro
 	if am.v2Mgr != nil {
 		return fmt.Errorf("%s uses whole-card allocation and has no virtual devices", ascend950DTName)
 	}
-	if mixed := am.MixedDevices(); mixed != nil {
-		physical, err := am.mgr.GetPhysicIDFromLogicID(logicID)
-		if err != nil || !slices.Contains(mixed.SharedDies, physical) {
-			return fmt.Errorf("refusing vNPU cleanup outside shared dies: logical ID %d", logicID)
-		}
+	if am.MixedDevices() != nil && !am.isMixedSharedDevice(logicID) {
+		return fmt.Errorf("refusing vNPU cleanup outside shared dies: logical ID %d", logicID)
 	}
 	return am.mgr.DestroyVirtualDevice(logicID, vdevID)
 }
