@@ -6,6 +6,7 @@ import (
 	"ascend-common/devmanager/dcmi"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/Project-HAMi/ascend-device-plugin/internal"
@@ -202,5 +203,59 @@ func TestDeclaredMixedTemplateAndSlots(t *testing.T) {
 	mixed.SharedTemplate = "unknown"
 	if err := am.validateMixedMode(); err == nil {
 		t.Fatal("template outside the device geometry was accepted")
+	}
+}
+
+func TestLoadMixedConfigByChipAlias(t *testing.T) {
+	const config = `vnpus:
+  deviceSplitCount: 2
+  hamiVnpuMode: template
+  configs:
+  - chipName: FChip-X
+    chipAliases: [Fake-X]
+    commonWord: FChipX
+    resourceName: huawei.com/FChipX
+    templates:
+    - {name: fake_32g, memory: 32768, aiCore: 12, aiCPU: 2}
+`
+	const node = `nodes:
+- name: mixed
+  mixedDevices:
+    wholeDieGroups: [[0, 1, 2, 3]]
+    sharedDies: [4, 5]
+    wholeResourceName: huawei.com/FChipWhole
+    sharedResourceName: huawei.com/FChipX
+    sharedTemplate: fake_32g
+    wholeAllocationSizes: [2, 4]
+`
+	for _, tc := range []struct {
+		name, chip, extra, want string
+	}{
+		{name: "alias", chip: "Fake-X", want: "FChipX"},
+		{name: "exact_over_alias", chip: "Fake-X", extra: "  - {chipName: Fake-X, commonWord: Exact}\n", want: "Exact"},
+		{name: "ambiguous_alias", chip: "Fake-X", extra: "  - {chipName: Other, chipAliases: [Fake-X], commonWord: Other}\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			am := &AscendManager{mgr: &chipInfoDeviceManager{chipName: tc.chip}}
+			err := am.LoadConfig(writeConfig(t, config+tc.extra))
+			if tc.want == "" {
+				if err == nil || err.Error() != "ambiguous vNPU chip alias Fake-X" {
+					t.Fatalf("expected ambiguous alias error, got %v", err)
+				}
+				return
+			}
+			if err != nil || am.CommonWord() != tc.want {
+				t.Fatalf("LoadConfig() = %v, common word = %q, want %q", err, am.CommonWord(), tc.want)
+			}
+			if tc.name != "alias" {
+				return
+			}
+			if err := am.LoadNodeConfig(writeConfig(t, node), "mixed"); err != nil {
+				t.Fatal(err)
+			}
+			if got := am.MixedDevices().WholeAllocationSizes; !slices.Equal(got, []int{2, 4}) {
+				t.Fatalf("wholeAllocationSizes = %v, want [2 4]", got)
+			}
+		})
 	}
 }
