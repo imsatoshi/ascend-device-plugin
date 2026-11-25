@@ -324,7 +324,7 @@ func (ps *PluginServer) startWholeDieEndpoint(mgr mixedDeviceManager) error {
 		return err
 	}
 	_ = conn.Close()
-	return ps.registerKubeletEndpoint(socket, wholeDieResource)
+	return ps.registerKubeletEndpoint(socket, mgr.MixedDevices().WholeResource())
 }
 
 func (ps *PluginServer) serve() error {

@@ -3,6 +3,9 @@ package manager
 import (
 	"fmt"
 	"slices"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/Project-HAMi/ascend-device-plugin/internal"
 )
@@ -89,10 +92,16 @@ func (am *AscendManager) validateMixedMode() error {
 	if resource == "" {
 		resource = "huawei.com/Ascend910C" // Existing mixed site files omit this field.
 	}
-	if am.v2Mgr != nil || resource == "huawei.com/Ascend910" || resource != am.ResourceName() ||
+	if am.v2Mgr != nil || resource == mixed.WholeResource() || resource != am.ResourceName() ||
 		resource != "huawei.com/"+am.CommonWord() ||
-		mode != internal.VNPUModeTemplate || am.VDeviceCount() != 4 || !am.nodeConfig.FilterDevices.IsEmpty() {
-		return fmt.Errorf("mixed devices require the configured shared resource in four-slot template mode without filterDevices")
+		mode != internal.VNPUModeTemplate || am.VDeviceCount() < 2 || !am.nodeConfig.FilterDevices.IsEmpty() {
+		return fmt.Errorf("mixed devices require distinct whole and shared resources in template mode without filterDevices")
+	}
+	if errs := validation.IsQualifiedName(mixed.WholeResource()); len(errs) != 0 || !strings.Contains(mixed.WholeResource(), "/") {
+		return fmt.Errorf("invalid whole accelerator resource %q", mixed.WholeResource())
+	}
+	if !slices.ContainsFunc(am.config.Templates, func(template internal.Template) bool { return template.Name == mixed.Template() }) {
+		return fmt.Errorf("mixed shared template %q is absent from the device geometry", mixed.Template())
 	}
 	return nil
 }

@@ -19,6 +19,8 @@ package manager
 import (
 	"errors"
 	"fmt"
+	"slices"
+
 	"sort"
 	"strings"
 	"sync"
@@ -145,6 +147,10 @@ func (am *AscendManager) shouldCheckIgnored() bool {
 	return am.nodeConfig != nil && !am.nodeConfig.FilterDevices.IsEmpty()
 }
 
+func (am *AscendManager) NetworkGroups() [][]int32 {
+	return am.config.NetworkGroups
+}
+
 func (am *AscendManager) LoadConfig(path string) error {
 	config, err := internal.LoadConfig(path)
 	if err != nil {
@@ -167,6 +173,16 @@ func (am *AscendManager) LoadConfig(path string) error {
 		if vnpu.ChipName == chipInfo.Name {
 			idx = i
 			break
+		}
+	}
+	if idx == -1 {
+		for i, vnpu := range config.VNPUs.Configs {
+			if slices.Contains(vnpu.ChipAliases, chipInfo.Name) {
+				if idx != -1 {
+					return fmt.Errorf("ambiguous vNPU chip alias %s", chipInfo.Name)
+				}
+				idx = i
+			}
 		}
 	}
 	// Older chart configurations use the DCMI name Ascend910 for 910C.

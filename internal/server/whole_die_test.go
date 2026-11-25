@@ -96,7 +96,7 @@ func TestWholeDieBestFitAndModulePairs(t *testing.T) {
 			card = 4 + i%2
 		}
 		mgr.whole = append(mgr.whole, &manager.Device{PhyID: i, CardID: card, Health: true})
-		available = append(available, wholeDieID(i))
+		available = append(available, wholeDieID(i, mgr.MixedDevices().WholeResource()))
 	}
 	s := &wholeDieServer{mgr: mgr}
 	for _, tc := range []struct {
@@ -239,5 +239,47 @@ func TestWhole910B3AllocatesPhysicalIDsFromCardIDGroup(t *testing.T) {
 	}
 	if got := response.ContainerResponses[0].Envs["ASCEND_VISIBLE_DEVICES"]; got != "4,5,6,7" {
 		t.Fatalf("want runtime PhyIDs 4,5,6,7, got %s", got)
+	}
+}
+
+func TestDeclaredWholeDeviceIdentity(t *testing.T) {
+	config := &internal.MixedDevices{
+		WholeResourceName: "huawei.com/FakechipWhole",
+	}
+	if got := config.WholeResource(); got != "huawei.com/FakechipWhole" {
+		t.Fatalf("whole resource = %q", got)
+	}
+	if got := wholeDieID(7, config.WholeResource()); got != "FakechipWhole-7" {
+		t.Fatalf("whole device ID = %q", got)
+	}
+}
+
+func TestDeclaredNetworkGroups(t *testing.T) {
+	groups := [][]int32{{9, 42}, {7}}
+	for _, tc := range []struct {
+		id   int32
+		want int
+	}{{9, 0}, {42, 0}, {7, 1}} {
+		got, err := declaredNetworkID(groups, tc.id)
+		if err != nil || got != tc.want {
+			t.Fatalf("device %d got network %d, %v", tc.id, got, err)
+		}
+	}
+	if _, err := declaredNetworkID(groups, 0); err == nil {
+		t.Fatal("unknown device received a network group")
+	}
+}
+
+func TestDeclaredWholeAllocationSizes(t *testing.T) {
+	mgr := &mixedManagerFixture{config: internal.MixedDevices{
+		WholeDieGroups: [][]int32{{0, 1}}, WholeAllocationSizes: []int{2},
+	}, whole: []*manager.Device{{PhyID: 0, Health: true}, {PhyID: 1, Health: true}}}
+	s := &wholeDieServer{mgr: mgr}
+	available := []string{"Ascend910-0", "Ascend910-1"}
+	if _, err := s.selectGroup(available, nil, 1); err == nil {
+		t.Fatal("accepted a size outside the declared choices")
+	}
+	if _, err := s.selectGroup(available, nil, 2); err != nil {
+		t.Fatal(err)
 	}
 }
