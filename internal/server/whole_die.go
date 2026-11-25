@@ -19,6 +19,7 @@ const wholeDieResource = "huawei.com/Ascend910"
 type mixedDeviceManager interface {
 	MixedDevices() *internal.MixedDevices
 	WholeDevices() []*manager.Device
+	CheckWholeDie(*manager.Device) error
 }
 
 type wholeDieServer struct {
@@ -131,6 +132,10 @@ func (s *wholeDieServer) GetPreferredAllocation(_ context.Context, req *plugin.P
 
 func (s *wholeDieServer) Allocate(_ context.Context, req *plugin.AllocateRequest) (*plugin.AllocateResponse, error) {
 	resp := &plugin.AllocateResponse{}
+	devices := make(map[string]*manager.Device)
+	for _, dev := range s.mgr.WholeDevices() {
+		devices[wholeDieID(dev.PhyID)] = dev
+	}
 	for _, ctr := range req.GetContainerRequests() {
 		requested := ctr.GetDevicesIds()
 		ids, err := s.selectGroup(requested, requested, len(requested))
@@ -139,11 +144,14 @@ func (s *wholeDieServer) Allocate(_ context.Context, req *plugin.AllocateRequest
 		}
 		physical := make([]int, 0, len(ids))
 		for _, id := range ids {
-			phy, err := strconv.Atoi(strings.TrimPrefix(id, "Ascend910-"))
-			if err != nil {
+			dev := devices[id]
+			if dev == nil || !dev.Health {
+				return nil, fmt.Errorf("whole die %s is unavailable", id)
+			}
+			if err := s.mgr.CheckWholeDie(dev); err != nil {
 				return nil, err
 			}
-			physical = append(physical, phy)
+			physical = append(physical, int(dev.PhyID))
 		}
 		slices.Sort(physical)
 		visible := make([]string, 0, len(ids))

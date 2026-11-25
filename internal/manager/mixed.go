@@ -92,3 +92,20 @@ func (am *AscendManager) markMixedUnhealthy() {
 	am.devs = unhealthy(am.devs)
 	am.wholeDevs = unhealthy(am.wholeDevs)
 }
+
+// CheckWholeDie verifies that the die has no residual vNPU from a previous
+// mode. Driver errors withhold the die until the next successful discovery.
+func (am *AscendManager) CheckWholeDie(device *Device) error {
+	physical, err := am.mgr.GetPhysicIDFromLogicID(device.LogicID)
+	if err != nil || physical != device.PhyID {
+		return fmt.Errorf("cannot verify physical identity of die %d", device.PhyID)
+	}
+	infos, err := am.mgr.GetVirtualDeviceInfo(device.LogicID)
+	if err != nil {
+		return fmt.Errorf("cannot verify vNPU state of die %d: %w", device.PhyID, err)
+	}
+	if infos.TotalResource.VDevNum != 0 || len(infos.VDevInfo) != 0 {
+		return fmt.Errorf("whole die %d still has vNPUs", device.PhyID)
+	}
+	return nil
+}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -12,12 +13,15 @@ import (
 
 type mixedManagerFixture struct {
 	*FakeManager
-	config internal.MixedDevices
-	whole  []*manager.Device
+	config        internal.MixedDevices
+	whole         []*manager.Device
+	wholeCheckErr error
 }
 
 func (m *mixedManagerFixture) MixedDevices() *internal.MixedDevices { return &m.config }
 func (m *mixedManagerFixture) WholeDevices() []*manager.Device      { return m.whole }
+
+func (m *mixedManagerFixture) CheckWholeDie(*manager.Device) error { return m.wholeCheckErr }
 
 func TestWholeDieAllocation(t *testing.T) {
 	mgr := &mixedManagerFixture{
@@ -62,6 +66,11 @@ func TestWholeDieAllocation(t *testing.T) {
 	if !reflect.DeepEqual(response.ContainerResponses[0], want) {
 		t.Fatalf("expected the vendor runtime contract, got %v", response)
 	}
+	mgr.wholeCheckErr = errors.New("residual vNPU")
+	if _, err := allocate("Ascend910-0"); !errors.Is(err, mgr.wholeCheckErr) {
+		t.Fatalf("whole allocation accepted a die with a residual vNPU: %v", err)
+	}
+	mgr.wholeCheckErr = nil
 	for _, ids := range [][]string{{"shared-0"}, {"Ascend910-0", "Ascend910-3"}, {"Ascend910-1", "Ascend910-1"}} {
 		if _, err := allocate(ids...); err == nil {
 			t.Fatalf("accepted invalid request %v", ids)

@@ -336,6 +336,12 @@ func (am *AscendManager) UpdateDevice() (err error) {
 		if err != nil {
 			return err
 		}
+		for _, dev := range whole {
+			if err := am.CheckWholeDie(dev); err != nil {
+				klog.Warningf("withholding whole die: %v", err)
+				dev.Health = false
+			}
+		}
 	}
 	am.mu.Lock()
 	am.wholeDevs = whole
