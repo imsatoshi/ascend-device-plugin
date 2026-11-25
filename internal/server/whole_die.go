@@ -14,8 +14,6 @@ import (
 	plugin "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-const wholeDieResource = "huawei.com/Ascend910"
-
 type mixedDeviceManager interface {
 	MixedDevices() *internal.MixedDevices
 	WholeDevices() []*manager.Device
@@ -27,8 +25,9 @@ type wholeDieServer struct {
 	mgr mixedDeviceManager
 }
 
-func wholeDieID(phyID int32) string {
-	return "Ascend910-" + strconv.FormatInt(int64(phyID), 10)
+func wholeDieID(phyID int32, resource string) string {
+	_, suffix, _ := strings.Cut(resource, "/")
+	return suffix + "-" + strconv.FormatInt(int64(phyID), 10)
 }
 
 func (s *wholeDieServer) devices() []*plugin.Device {
@@ -38,7 +37,7 @@ func (s *wholeDieServer) devices() []*plugin.Device {
 		if die.Health {
 			health = plugin.Healthy
 		}
-		devices = append(devices, &plugin.Device{ID: wholeDieID(die.PhyID), Health: health})
+		devices = append(devices, &plugin.Device{ID: wholeDieID(die.PhyID, s.mgr.MixedDevices().WholeResource()), Health: health})
 	}
 	slices.SortFunc(devices, func(a, b *plugin.Device) int { return strings.Compare(a.ID, b.ID) })
 	return devices
@@ -80,10 +79,13 @@ func (s *wholeDieServer) selectGroup(available, required []string, count int) ([
 	}
 	healthy := make(map[string]*manager.Device)
 	config := s.mgr.MixedDevices()
+	if len(config.WholeAllocationSizes) > 0 && !slices.Contains(config.WholeAllocationSizes, count) {
+		return nil, fmt.Errorf("whole device allocation size %d is outside the declared sizes", count)
+	}
 	ids := make(map[int32]string)
 	for _, die := range s.mgr.WholeDevices() {
 		if die.Health {
-			id := wholeDieID(die.PhyID)
+			id := wholeDieID(die.PhyID, s.mgr.MixedDevices().WholeResource())
 			healthy[id] = die
 			ids[die.PartitionID(config)] = id
 		}
@@ -183,7 +185,7 @@ func (s *wholeDieServer) Allocate(_ context.Context, req *plugin.AllocateRequest
 	resp := &plugin.AllocateResponse{}
 	devices := make(map[string]*manager.Device)
 	for _, dev := range s.mgr.WholeDevices() {
-		devices[wholeDieID(dev.PhyID)] = dev
+		devices[wholeDieID(dev.PhyID, s.mgr.MixedDevices().WholeResource())] = dev
 	}
 	for _, ctr := range req.GetContainerRequests() {
 		requested := ctr.GetDevicesIds()

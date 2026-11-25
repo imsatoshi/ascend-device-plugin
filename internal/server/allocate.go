@@ -38,9 +38,9 @@ func (ps *PluginServer) buildContainerAllocateResponse(pod *v1.Pod, ctrName stri
 			return nil, fmt.Errorf("unknown uuid: %s", dev.UUID)
 		}
 		if mgr, ok := ps.mgr.(mixedDeviceManager); ok && mgr.MixedDevices() != nil {
-			if !d.Health || len(containerDevs) != 1 || rtInfoLookup[dev.UUID].Temp != "vir05_1c_16g" ||
+			if !d.Health || len(containerDevs) != 1 || rtInfoLookup[dev.UUID].Temp != mgr.MixedDevices().Template() ||
 				(pod.Annotations[VNPUModeAnnotation] != "" && pod.Annotations[VNPUModeAnnotation] != VNPUModeTemplate) {
-				return nil, fmt.Errorf("mixed shared pool requires one healthy die and the vir05_1c_16g template")
+				return nil, fmt.Errorf("mixed shared pool requires one healthy device and the %s template", mgr.MixedDevices().Template())
 			}
 		}
 		IDs = append(IDs, d.PhyID)

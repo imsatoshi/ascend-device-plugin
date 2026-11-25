@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -150,8 +151,19 @@ func (ps *PluginServer) registerHAMi() error {
 		if managerUsesENPU(ps.mgr) && !ps.mgr.IsHamiVnpuCore() {
 			device.Mode = VNPUModeENPU
 		}
-		if strings.HasPrefix(device.Type, Ascend910Prefix) {
-			networkID, err := ps.getDeviceNetworkID(i, device.Type)
+		network, hasNetwork := ps.mgr.(interface{ NetworkGroups() [][]int32 })
+		var networkGroups [][]int32
+		if hasNetwork {
+			networkGroups = network.NetworkGroups()
+		}
+		if len(networkGroups) > 0 || strings.HasPrefix(device.Type, Ascend910Prefix) {
+			var networkID int
+			var err error
+			if len(networkGroups) > 0 {
+				networkID, err = declaredNetworkID(networkGroups, dev.PhyID)
+			} else {
+				networkID, err = ps.getDeviceNetworkID(i, device.Type)
+			}
 			if err != nil {
 				return fmt.Errorf("get networkID error: %w", err)
 			}
@@ -209,6 +221,22 @@ func (ps *PluginServer) registerHAMi() error {
 	}
 	klog.V(5).Infof("patch node %s annotations: %v", ps.nodeName, annos)
 	return nil
+}
+
+func declaredNetworkID(groups [][]int32, phyID int32) (int, error) {
+	found := -1
+	for i, group := range groups {
+		if slices.Contains(group, phyID) {
+			if found >= 0 {
+				return 0, fmt.Errorf("physical device %d belongs to multiple network groups", phyID)
+			}
+			found = i
+		}
+	}
+	if found < 0 {
+		return 0, fmt.Errorf("physical device %d has no declared network group", phyID)
+	}
+	return found, nil
 }
 
 func (ps *PluginServer) getDeviceNetworkID(idx int, deviceType string) (int, error) {

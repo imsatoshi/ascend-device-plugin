@@ -38,6 +38,8 @@ type Template struct {
 type VNPUConfig struct {
 	CommonWord         string     `json:"commonWord"`
 	ChipName           string     `json:"chipName"`
+	ChipAliases        []string   `json:"chipAliases,omitempty"`
+	NetworkGroups      [][]int32  `json:"networkGroups,omitempty"`
 	ResourceName       string     `json:"resourceName"`
 	ResourceMemoryName string     `json:"resourceMemoryName"`
 	MemoryAllocatable  int64      `json:"memoryAllocatable"`
@@ -182,10 +184,27 @@ func LoadConfig(path string) (*Config, error) {
 // MixedDevices pins the whole-die HCCS groups and the template pool to
 // DCMI IDs. The default is PhyID. Every die must belong to exactly one group.
 type MixedDevices struct {
-	IDSource           string    `json:"idSource,omitempty" yaml:"idSource,omitempty"`
-	SharedResourceName string    `json:"sharedResourceName,omitempty" yaml:"sharedResourceName,omitempty"`
-	WholeDieGroups     [][]int32 `json:"wholeDieGroups" yaml:"wholeDieGroups"`
-	SharedDies         []int32   `json:"sharedDies" yaml:"sharedDies"`
+	IDSource             string    `json:"idSource,omitempty" yaml:"idSource,omitempty"`
+	WholeAllocationSizes []int     `json:"wholeAllocationSizes,omitempty" yaml:"wholeAllocationSizes,omitempty"`
+	WholeResourceName    string    `json:"wholeResourceName,omitempty" yaml:"wholeResourceName,omitempty"`
+	SharedTemplate       string    `json:"sharedTemplate,omitempty" yaml:"sharedTemplate,omitempty"`
+	SharedResourceName   string    `json:"sharedResourceName,omitempty" yaml:"sharedResourceName,omitempty"`
+	WholeDieGroups       [][]int32 `json:"wholeDieGroups" yaml:"wholeDieGroups"`
+	SharedDies           []int32   `json:"sharedDies" yaml:"sharedDies"`
+}
+
+func (m *MixedDevices) WholeResource() string {
+	if m.WholeResourceName != "" {
+		return m.WholeResourceName
+	}
+	return "huawei.com/Ascend910"
+}
+
+func (m *MixedDevices) Template() string {
+	if m.SharedTemplate != "" {
+		return m.SharedTemplate
+	}
+	return "vir05_1c_16g"
 }
 
 type NodeConfig struct {
