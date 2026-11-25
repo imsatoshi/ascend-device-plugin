@@ -75,6 +75,7 @@ type PluginServer struct {
 	enablePeriodicIdleVNPUCleanup bool
 	idleVNPUReconciler            cleanup.IdleVNPUReconciler
 	wg                            sync.WaitGroup
+	allocationMu                  sync.Mutex
 
 	// lastPublishedDevices fingerprints the device set most recently handed to
 	// kubelet through ListAndWatch, so watchAndRegister only pushes an update
@@ -363,7 +364,7 @@ func (ps *PluginServer) apiDevices() []*v1beta1.Device {
 }
 
 func (ps *PluginServer) GetDevicePluginOptions(context.Context, *v1beta1.Empty) (*v1beta1.DevicePluginOptions, error) {
-	return &v1beta1.DevicePluginOptions{}, nil
+	return &v1beta1.DevicePluginOptions{GetPreferredAllocationAvailable: true}, nil
 }
 
 func (ps *PluginServer) ListAndWatch(e *v1beta1.Empty, s v1beta1.DevicePlugin_ListAndWatchServer) error {
@@ -378,74 +379,120 @@ func (ps *PluginServer) ListAndWatch(e *v1beta1.Empty, s v1beta1.DevicePlugin_Li
 	}
 }
 
-func (ps *PluginServer) GetPreferredAllocation(context.Context, *v1beta1.PreferredAllocationRequest) (*v1beta1.PreferredAllocationResponse, error) {
-	return nil, fmt.Errorf("not supported")
+func (ps *PluginServer) GetPreferredAllocation(ctx context.Context, requests *v1beta1.PreferredAllocationRequest) (*v1beta1.PreferredAllocationResponse, error) {
+	pod, _, err := ps.lockedPendingPod(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get pending pod: %w", err)
+	}
+	allocations, err := ps.decodeDeviceAnnotations(pod)
+	if err != nil {
+		return nil, err
+	}
+	response := &v1beta1.PreferredAllocationResponse{}
+	for _, request := range requests.GetContainerRequests() {
+		devices, _, err := ps.popNextContainerDevices(pod, allocations)
+		if err != nil {
+			return nil, err
+		}
+		if int(request.GetAllocationSize()) != len(devices) {
+			return nil, fmt.Errorf("preferred allocation size does not match the locked Pod")
+		}
+		ids, err := preferredSlots(devices, request.GetAvailableDeviceIDs(), request.GetMustIncludeDeviceIDs())
+		if err != nil {
+			return nil, err
+		}
+		response.ContainerResponses = append(response.ContainerResponses, &v1beta1.ContainerPreferredAllocationResponse{DeviceIDs: ids})
+	}
+	return response, nil
 }
 
 func (ps *PluginServer) Allocate(ctx context.Context, reqs *v1beta1.AllocateRequest) (*v1beta1.AllocateResponse, error) {
-	klog.V(5).Infof("Allocate: %v", reqs)
-	success := false
-	var pod *v1.Pod
-	defer func() {
-		if pod == nil {
-			return
-		}
-		if success {
-			ps.podAllocationTrySuccess(pod)
-		} else {
-			ps.podAllocationFailed(pod)
-		}
-	}()
+	ps.allocationMu.Lock()
+	defer ps.allocationMu.Unlock()
 
-	var err error
-	pod, err = util.GetPendingPod(ctx, ps.nodeName)
+	pod, lock, err := ps.lockedPendingPod(ctx)
 	if err != nil {
-		klog.Errorf("get pending pod error: %v", err)
-		return nil, fmt.Errorf("get pending pod error: %w", err)
+		return nil, fmt.Errorf("get pending pod: %w", err)
 	}
-	klog.Infof("allocating for pod %s/%s", pod.Namespace, pod.Name)
-
-	rtInfoLookup, err := ps.buildRuntimeInfoLookup(pod)
-	if err != nil {
-		return nil, fmt.Errorf("build runtimeInfo lookup: %w", err)
-	}
-
-	podSingleDev, err := ps.decodeDeviceAnnotations(pod)
+	podDevices, err := ps.decodeDeviceAnnotations(pod)
 	if err != nil {
 		return nil, fmt.Errorf("decode device annotations: %w", err)
 	}
 
-	// kubelet may call Allocate multiple times for the same pod, each time with
-	// a subset of containers. Use pop semantics to match each request with its
-	// corresponding containerDevices.
-	responses := v1beta1.AllocateResponse{}
-	for _, req := range reqs.ContainerRequests {
-		containerDevs, ctrName, err := ps.popNextContainerDevices(pod, podSingleDev)
+	requests := reqs.GetContainerRequests()
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("empty Ascend Allocate request")
+	}
+	// Validate the whole request before any phase update or runtime side effect.
+	selections := make([]device.ContainerDevices, len(requests))
+	containers := make([]string, len(requests))
+	for i, req := range requests {
+		selections[i], containers[i], err = ps.popNextContainerDevices(pod, podDevices)
 		if err != nil {
 			return nil, fmt.Errorf("get next container devices: %w", err)
 		}
-		klog.Infof("containerDevs: %+v", containerDevs)
-
-		if len(containerDevs) != len(req.DevicesIds) {
-			return nil, fmt.Errorf("device number not matched: annotation has %d, request has %d", len(containerDevs), len(req.DevicesIds))
+		if len(selections[i]) != len(req.GetDevicesIds()) {
+			return nil, fmt.Errorf("device number not matched: annotation has %d, request has %d", len(selections[i]), len(req.GetDevicesIds()))
 		}
+		if !requestedDevicesMatch(selections[i], req.GetDevicesIds()) {
+			return nil, fmt.Errorf("requested device IDs do not match the locked Pod %s/%s", pod.Namespace, pod.Name)
+		}
+	}
 
-		resp, err := ps.buildContainerAllocateResponse(pod, ctrName, containerDevs, rtInfoLookup)
+	response, err := ps.buildAllocateResponse(pod, selections, containers)
+	if err != nil {
+		// The Pod revision prevents a failed write from replacing a concurrent success.
+		if patchErr := ps.patchAllocation(ctx, pod, lock, map[string]string{util.DeviceBindPhase: util.DeviceBindFailed}); patchErr == nil {
+			if releaseErr := ps.releaseAllocation(ctx, lock); releaseErr != nil {
+				klog.ErrorS(releaseErr, "Failed to release Ascend allocation lock", "pod", klog.KObj(pod))
+			}
+		} else {
+			klog.ErrorS(patchErr, "Failed to publish Ascend allocation failure", "pod", klog.KObj(pod))
+		}
+		return nil, err
+	}
+
+	remaining := device.EncodePodSingleDevice(podDevices)
+	annotations := map[string]string{ps.toAllocDeviceAnno: remaining}
+	completed := true
+	for key, value := range pod.Annotations {
+		if key == ps.toAllocDeviceAnno {
+			value = remaining
+		}
+		if strings.HasPrefix(key, "hami.io/Ascend") && strings.HasSuffix(key, "-devices-to-allocate") &&
+			strings.Trim(value, ";") != "" {
+			completed = false
+			break
+		}
+	}
+	if completed {
+		annotations[util.DeviceBindPhase] = util.DeviceBindSuccess
+	}
+	if err := ps.patchAllocation(ctx, pod, lock, annotations); err != nil {
+		return nil, fmt.Errorf("publish Ascend allocation: %w", err)
+	}
+	if completed {
+		if err := ps.releaseAllocation(ctx, lock); err != nil {
+			klog.ErrorS(err, "Failed to release Ascend allocation lock", "pod", klog.KObj(pod))
+		}
+	}
+	return response, nil
+}
+
+func (ps *PluginServer) buildAllocateResponse(pod *v1.Pod, selections []device.ContainerDevices, containers []string) (*v1beta1.AllocateResponse, error) {
+	runtimeInfo, err := ps.buildRuntimeInfoLookup(pod)
+	if err != nil {
+		return nil, fmt.Errorf("build runtimeInfo lookup: %w", err)
+	}
+	response := &v1beta1.AllocateResponse{}
+	for i, devices := range selections {
+		container, err := ps.buildContainerAllocateResponse(pod, containers[i], devices, runtimeInfo)
 		if err != nil {
 			return nil, fmt.Errorf("build container allocate response: %w", err)
 		}
-		responses.ContainerResponses = append(responses.ContainerResponses, resp)
+		response.ContainerResponses = append(response.ContainerResponses, container)
 	}
-
-	// Patch the annotation with the in-memory erased podSingleDev.
-	if err := ps.patchErasedAnnotation(pod, podSingleDev); err != nil {
-		klog.Errorf("erase allocated containers annotation error: %v", err)
-		return nil, fmt.Errorf("erase allocated containers annotation: %w", err)
-	}
-
-	klog.V(5).Infof("allocate response: %+v", responses.ContainerResponses)
-	success = true
-	return &responses, nil
+	return response, nil
 }
 
 func (ps *PluginServer) PreStartContainer(context.Context, *v1beta1.PreStartContainerRequest) (*v1beta1.PreStartContainerResponse, error) {

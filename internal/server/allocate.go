@@ -11,7 +11,6 @@ import (
 	"k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 
 	"github.com/Project-HAMi/HAMi/pkg/device"
-	"github.com/Project-HAMi/HAMi/pkg/device-plugin/nvidiadevice/nvinternal/plugin"
 	"github.com/Project-HAMi/HAMi/pkg/util"
 )
 
@@ -191,17 +190,4 @@ func (ps *PluginServer) patchErasedAnnotation(pod *v1.Pod, podSingleDev device.P
 	}
 	pod.Annotations[ps.toAllocDeviceAnno] = newAnnoValue
 	return nil
-}
-
-// podAllocationTrySuccess checks if all containers of this pod have been
-// allocated. If so, it sets bind-phase to "success" and releases the node
-// lock; otherwise it returns without setting bind-phase or releasing the lock,
-// waiting for the next Allocate call.
-func (ps *PluginServer) podAllocationTrySuccess(pod *v1.Pod) {
-	plugin.PodAllocationTrySuccess(ps.nodeName, ps.commonWord, NodeLockAscend, pod)
-}
-
-// podAllocationFailed sets bind-phase to "failed" and releases the node lock.
-func (ps *PluginServer) podAllocationFailed(pod *v1.Pod) {
-	plugin.PodAllocationFailed(ps.nodeName, pod, NodeLockAscend)
 }
