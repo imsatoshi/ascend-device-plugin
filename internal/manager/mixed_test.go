@@ -160,6 +160,7 @@ func TestConfiguredMixedSharedResource(t *testing.T) {
 			am := newMixedTestManager(&mixedTestDriver{})
 			am.nodeConfig.VDeviceCount = 4
 			am.config.CommonWord = resource
+			am.config.Templates = []internal.Template{{Name: "vir05_1c_16g"}}
 			am.config.ResourceName = "huawei.com/" + resource
 			am.nodeConfig.MixedDevices.SharedResourceName = am.config.ResourceName
 			if err := am.validateMixedMode(); err != nil {
@@ -182,5 +183,24 @@ func TestMixed910B3UsesCardIDForPartition(t *testing.T) {
 	whole, shared, err := partitionDies(cfg, devices)
 	if err != nil || len(whole) != 4 || len(shared) != 4 || whole[0].PhyID != 7 || shared[0].PhyID != 3 {
 		t.Fatalf("910B3 partition did not follow CardID: whole=%v shared=%v err=%v", whole, shared, err)
+	}
+}
+
+func TestDeclaredMixedTemplateAndSlots(t *testing.T) {
+	am := newMixedTestManager(&mixedTestDriver{})
+	am.nodeConfig.VDeviceCount = 2
+	am.config.CommonWord = "FChipX"
+	am.config.ResourceName = "huawei.com/FChipX"
+	am.config.Templates = []internal.Template{{Name: "fake_32g"}}
+	mixed := am.nodeConfig.MixedDevices
+	mixed.SharedResourceName = am.config.ResourceName
+	mixed.WholeResourceName = "huawei.com/FChipWhole"
+	mixed.SharedTemplate = "fake_32g"
+	if err := am.validateMixedMode(); err != nil {
+		t.Fatal(err)
+	}
+	mixed.SharedTemplate = "unknown"
+	if err := am.validateMixedMode(); err == nil {
+		t.Fatal("template outside the device geometry was accepted")
 	}
 }

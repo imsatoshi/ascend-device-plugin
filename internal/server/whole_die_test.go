@@ -120,20 +120,24 @@ func TestWholeDieBestFitAndModulePairs(t *testing.T) {
 }
 
 func TestMixedSharedAllocationGuard(t *testing.T) {
+	const template = "fake_32g"
 	dies := map[string]*manager.Device{"shared": {Health: true, PhyID: 4}, "unhealthy": {PhyID: 5}}
-	ps := &PluginServer{mgr: &mixedManagerFixture{FakeManager: &FakeManager{
-		GetDeviceByUUIDFunc: func(id string) *manager.Device { return dies[id] },
-	}}}
+	ps := &PluginServer{mgr: &mixedManagerFixture{
+		config: internal.MixedDevices{SharedTemplate: template},
+		FakeManager: &FakeManager{
+			GetDeviceByUUIDFunc: func(id string) *manager.Device { return dies[id] },
+		},
+	}}
 	for _, tc := range []struct {
 		name, mode, template string
 		ids                  []string
 		wantError            bool
 	}{
-		{"valid", VNPUModeTemplate, "vir05_1c_16g", []string{"shared"}, false},
-		{"unhealthy", "", "vir05_1c_16g", []string{"unhealthy"}, true},
-		{"two devices", "", "vir05_1c_16g", []string{"shared", "shared"}, true},
-		{"wrong template", "", "vir06_1c_16g", []string{"shared"}, true},
-		{"wrong mode", VNPUModeHamiCore, "vir05_1c_16g", []string{"shared"}, true},
+		{"valid", VNPUModeTemplate, template, []string{"shared"}, false},
+		{"unhealthy", "", template, []string{"unhealthy"}, true},
+		{"two devices", "", template, []string{"shared", "shared"}, true},
+		{"wrong template", "", "vir05_1c_16g", []string{"shared"}, true},
+		{"wrong mode", VNPUModeHamiCore, template, []string{"shared"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{}
@@ -146,7 +150,7 @@ func TestMixedSharedAllocationGuard(t *testing.T) {
 			}
 			resp, err := ps.buildContainerAllocateResponse(pod, "ctr", devices, info)
 			if tc.wantError {
-				if err == nil || err.Error() != "mixed shared pool requires one healthy die and the vir05_1c_16g template" {
+				if err == nil || err.Error() != "mixed shared pool requires one healthy device and the "+template+" template" {
 					t.Fatalf("expected mixed shared isolation error, got %v", err)
 				}
 			} else if err != nil || resp.Envs["ASCEND_VISIBLE_DEVICES"] != "4" {
