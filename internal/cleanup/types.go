@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/Project-HAMi/ascend-device-plugin/internal"
 	"github.com/Project-HAMi/ascend-device-plugin/internal/manager"
 )
 
@@ -46,6 +47,8 @@ type PodAllocationSnapshot interface {
 }
 
 type DeviceResolver interface {
+	MixedDevices() *internal.MixedDevices
+	ResourceName() string
 	GetDeviceByUUID(string) *manager.Device
 }
 
@@ -108,9 +111,10 @@ type ReconcileResult struct {
 }
 
 // HardwareView is the minimum platform-side hardware surface needed by the
-// reconciler.  manager.Manager implements it while retaining its existing
-// allocation and registration APIs.
+// reconciler. The Ascend manager provides the validated node layout and
+// the shared devices selected from that layout.
 type HardwareView interface {
+	MixedDevices() *internal.MixedDevices
 	UpdateDevice() error
 	GetDevices() []*manager.Device
 	ListVirtualDevices(logicID int32) ([]manager.VirtualDevice, error)

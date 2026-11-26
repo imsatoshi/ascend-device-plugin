@@ -15,10 +15,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/Project-HAMi/ascend-device-plugin/internal"
 	"github.com/Project-HAMi/ascend-device-plugin/internal/manager"
 )
 
 type fakeHardware struct {
+	mixed            *internal.MixedDevices
 	devices          []*manager.Device
 	virtual          map[int32][]manager.VirtualDevice
 	updateErr        error
@@ -28,8 +30,9 @@ type fakeHardware struct {
 	destroyed        []manager.VirtualDevice
 }
 
-func (f *fakeHardware) UpdateDevice() error           { return f.updateErr }
-func (f *fakeHardware) GetDevices() []*manager.Device { return f.devices }
+func (f *fakeHardware) MixedDevices() *internal.MixedDevices { return f.mixed }
+func (f *fakeHardware) UpdateDevice() error                  { return f.updateErr }
+func (f *fakeHardware) GetDevices() []*manager.Device        { return f.devices }
 func (f *fakeHardware) ListVirtualDevices(logicID int32) ([]manager.VirtualDevice, error) {
 	if err := f.listErr[logicID]; err != nil {
 		return nil, err
@@ -193,6 +196,69 @@ func TestReconcilerReclaimsOnlyIdleVNPUsAfterConfirmation(t *testing.T) {
 	}
 	if result.VNPUsSkipped != 1 || result.VNPUsDestroyed != 1 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestReconcilerEmptySiblingConfirmationByLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		mixed                     *internal.MixedDevices
+		wantResets, wantDestroyed int
+	}{
+		{name: "mixed", mixed: &internal.MixedDevices{}, wantDestroyed: 1},
+		{name: "pure", wantResets: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hw := testHardware() // logic ID 3 has one idle and one used vNPU
+			hw.mixed = tc.mixed
+			hw.devices = append(hw.devices, &manager.Device{LogicID: 5, CardID: 7})
+			now := time.Unix(100, 0)
+			r := NewReconciler(hw, fakeSnapshot{snapshot: AllocationSnapshot{Ready: true}}, ReconcilerOptions{
+				GracePeriod: time.Minute, Confirmations: 2, Clock: func() time.Time { return now },
+			})
+			first, err := r.Reconcile(context.Background())
+			if err != nil || first.ConfirmationResets != tc.wantResets || len(hw.destroyed) != 0 {
+				t.Fatalf("before grace: result=%+v destroyed=%v err=%v", first, hw.destroyed, err)
+			}
+			now = now.Add(time.Minute)
+			second, err := r.Reconcile(context.Background())
+			if err != nil || second.ConfirmationResets != tc.wantResets || len(hw.destroyed) != tc.wantDestroyed {
+				t.Fatalf("after grace: result=%+v destroyed=%v err=%v", second, hw.destroyed, err)
+			}
+			if tc.wantDestroyed == 1 && (hw.destroyed[0].LogicID != 3 || hw.destroyed[0].VDevID != 11) {
+				t.Fatalf("destroyed=%v, want idle vdev 11 on logic ID 3", hw.destroyed)
+			}
+		})
+	}
+}
+
+func TestReconcilerMixedCardClaimResetsBothDiesBeforeDestroy(t *testing.T) {
+	hw := testHardware()
+	hw.mixed = &internal.MixedDevices{}
+	hw.devices = append(hw.devices, &manager.Device{LogicID: 5, CardID: 7})
+	snapshot := &sequenceSnapshot{snapshots: []AllocationSnapshot{
+		{Ready: true},
+		{Ready: true},
+		{Ready: true, ClaimsByCard: map[int32]CardClaim{7: {CardID: 7, State: ClaimProtected}}},
+		{Ready: true},
+	}}
+	now := time.Unix(100, 0)
+	r := NewReconciler(hw, snapshot, ReconcilerOptions{
+		GracePeriod: time.Minute, Confirmations: 2, Clock: func() time.Time { return now },
+	})
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Only die 3 has enough history to trigger the second snapshot.
+	hw.virtual[5] = []manager.VirtualDevice{{LogicID: 5, CardID: 7, VDevID: 13}}
+	now = now.Add(time.Minute)
+	result, err := r.Reconcile(context.Background())
+	if err != nil || result.ConfirmationResets != 2 || len(hw.destroyed) != 0 {
+		t.Fatalf("late card claim: result=%+v destroyed=%v err=%v", result, hw.destroyed, err)
+	}
+	now = now.Add(time.Minute)
+	if _, err := r.Reconcile(context.Background()); err != nil || len(hw.destroyed) != 0 {
+		t.Fatalf("first observation after claim cleared: destroyed=%v err=%v", hw.destroyed, err)
 	}
 }
 

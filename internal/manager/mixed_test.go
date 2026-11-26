@@ -41,6 +41,7 @@ type mixedTestDriver struct {
 	*devmanager.DeviceManagerMock
 	fault     string
 	destroyed []int32
+	virtual   map[int32]common.VirtualDevInfo
 }
 
 func (d *mixedTestDriver) GetDeviceList() (int32, []int32, error) {
@@ -74,7 +75,7 @@ func (d *mixedTestDriver) GetVirtualDeviceInfo(id int32) (common.VirtualDevInfo,
 	if id == 2 && d.fault == "virtual" {
 		return common.VirtualDevInfo{}, errors.New("DCMI vNPU query failed")
 	}
-	return common.VirtualDevInfo{}, nil
+	return d.virtual[id], nil
 }
 
 func (d *mixedTestDriver) DestroyVirtualDevice(id int32, _ uint32) error {
@@ -258,4 +259,23 @@ func TestLoadMixedConfigByChipAlias(t *testing.T) {
 			}
 		})
 	}
+}
+
+// NewMixedCleanupTestManager exposes a validated manager with a fake DCMI
+// driver to the external test that exercises manager and cleanup together.
+func NewMixedCleanupTestManager(t *testing.T, wholeResource string) *AscendManager {
+	t.Helper()
+	vdevs := []common.CgoVDevQueryStru{{VDevID: 100}, {VDevID: 101}}
+	vdevs[1].QueryInfo.IsContainerUsed = 1
+	am := newMixedTestManager(&mixedTestDriver{virtual: map[int32]common.VirtualDevInfo{7: {VDevInfo: vdevs}}})
+	am.nodeConfig.VDeviceCount = 4
+	am.config.CommonWord = "Ascend910B3"
+	am.config.ResourceName = "huawei.com/Ascend910B3"
+	am.config.Templates = []internal.Template{{Name: "vir05_1c_16g"}}
+	am.nodeConfig.MixedDevices.WholeResourceName = wholeResource
+	am.nodeConfig.MixedDevices.SharedResourceName = am.ResourceName()
+	if err := am.ValidateWholeCardMode(); err != nil {
+		t.Fatal(err)
+	}
+	return am
 }
