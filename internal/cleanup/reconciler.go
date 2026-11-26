@@ -45,9 +45,9 @@ type Reconciler struct {
 	confirmations int
 	clock         Clock
 
-	mu                  sync.Mutex
-	confirmationsByCard *confirmationTracker
-	seenVNPUs           map[virtualDeviceKey]time.Time
+	mu        sync.Mutex
+	tracker   *confirmationTracker
+	seenVNPUs map[virtualDeviceKey]time.Time
 }
 
 type virtualDeviceKey struct {
@@ -58,6 +58,14 @@ type virtualDeviceKey struct {
 type cardCandidate struct {
 	device manager.Device
 	vdevs  []manager.VirtualDevice
+}
+
+func deviceConfirmationKey(device *manager.Device, mixed bool) confirmationKey {
+	key := confirmationKey{cardID: device.CardID}
+	if mixed {
+		key.logicID = device.LogicID
+	}
+	return key
 }
 
 func NewReconciler(hardware HardwareView, snapshotter PodAllocationSnapshot, options ReconcilerOptions) *Reconciler {
@@ -71,13 +79,13 @@ func NewReconciler(hardware HardwareView, snapshotter PodAllocationSnapshot, opt
 		options.Clock = time.Now
 	}
 	return &Reconciler{
-		hardware:            hardware,
-		snapshotter:         snapshotter,
-		gracePeriod:         options.GracePeriod,
-		confirmations:       options.Confirmations,
-		clock:               options.Clock,
-		confirmationsByCard: newConfirmationTracker(),
-		seenVNPUs:           make(map[virtualDeviceKey]time.Time),
+		hardware:      hardware,
+		snapshotter:   snapshotter,
+		gracePeriod:   options.GracePeriod,
+		confirmations: options.Confirmations,
+		clock:         options.Clock,
+		tracker:       newConfirmationTracker(),
+		seenVNPUs:     make(map[virtualDeviceKey]time.Time),
 	}
 }
 
@@ -112,6 +120,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 	// Build candidates first. Pod ownership is sampled again after the complete
 	// hardware scan and immediately before any destroy, so a Pod created after
 	// the initial Snapshot cannot inherit an old card confirmation blindly.
+	mixed := r.hardware.MixedDevices() != nil
 	var candidates []cardCandidate
 	devices := r.hardware.GetDevices()
 	for _, device := range devices {
@@ -119,9 +128,10 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			continue
 		}
 		result.CardsInspected++
+		key := deviceConfirmationKey(device, mixed)
 		claim := snapshot.ClaimsByCard[device.CardID]
 		if claim.Protected() {
-			if r.confirmationsByCard.reset(device.CardID) {
+			if r.tracker.reset(key) {
 				result.ConfirmationResets++
 			}
 			result.CardsProtected++
@@ -130,7 +140,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 
 		virtualDevices, err := r.hardware.ListVirtualDevices(device.LogicID)
 		if err != nil {
-			if r.confirmationsByCard.reset(device.CardID) {
+			if r.tracker.reset(key) {
 				result.ConfirmationResets++
 			}
 			result.UnknownSnapshot = true
@@ -154,13 +164,13 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			idle = append(idle, virtualDevice)
 		}
 		if len(idle) == 0 {
-			if r.confirmationsByCard.reset(device.CardID) {
+			if r.tracker.reset(key) {
 				result.ConfirmationResets++
 			}
 			continue
 		}
 
-		if !r.confirmationsByCard.observe(device.CardID, now, claim.CandidateSince, r.gracePeriod, r.confirmations) {
+		if !r.tracker.observe(key, now, claim.CandidateSince, r.gracePeriod, r.confirmations) {
 			continue
 		}
 		// A vNPU that first appears in this scan gets its own grace period.
@@ -194,16 +204,27 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 			return result, err
 		}
 
-		for _, candidate := range candidates {
-			claim := latestSnapshot.ClaimsByCard[candidate.device.CardID]
-			if claim.Protected() {
-				if r.confirmationsByCard.reset(candidate.device.CardID) {
+		if mixed {
+			// A card-wide claim fences even a sibling that has not yet
+			// accumulated enough idle observations to be a candidate.
+			for key := range r.tracker.states {
+				if r.tracker.recheckClaim(key, latestSnapshot.ClaimsByCard[key.cardID]) {
 					result.ConfirmationResets++
 				}
+			}
+		}
+
+		for _, candidate := range candidates {
+			key := deviceConfirmationKey(&candidate.device, mixed)
+			claim := latestSnapshot.ClaimsByCard[candidate.device.CardID]
+			if !mixed && r.tracker.recheckClaim(key, claim) {
+				result.ConfirmationResets++
+			}
+			if claim.Protected() {
 				result.CardsProtected++
 				continue
 			}
-			if !r.confirmationsByCard.ready(candidate.device.CardID, now, claim.CandidateSince, r.gracePeriod, r.confirmations) {
+			if !r.tracker.ready(key, now, r.gracePeriod, r.confirmations) {
 				continue
 			}
 			result.CardsReclaimable++
@@ -233,7 +254,7 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileResult, error) {
 func (r *Reconciler) Reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.confirmationsByCard.resetAll()
+	r.tracker.resetAll()
 	r.seenVNPUs = make(map[virtualDeviceKey]time.Time)
 }
 
@@ -256,7 +277,7 @@ func (r *Reconciler) observeVNPUs(logicID int32, virtualDevices []manager.Virtua
 }
 
 func (r *Reconciler) resetAll(result *ReconcileResult) {
-	result.ConfirmationResets += r.confirmationsByCard.resetAll()
+	result.ConfirmationResets += r.tracker.resetAll()
 	r.seenVNPUs = make(map[virtualDeviceKey]time.Time)
 }
 

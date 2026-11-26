@@ -15,30 +15,37 @@ type confirmationState struct {
 	count          int
 }
 
+// Pod ownership is card-wide. On mixed nodes each shared logical die
+// accumulates its own hardware observations within that card.
+type confirmationKey struct {
+	cardID  int32
+	logicID int32
+}
+
 type confirmationTracker struct {
-	states map[int32]confirmationState
+	states map[confirmationKey]confirmationState
 }
 
 func newConfirmationTracker() *confirmationTracker {
-	return &confirmationTracker{states: make(map[int32]confirmationState)}
+	return &confirmationTracker{states: make(map[confirmationKey]confirmationState)}
 }
 
-func (t *confirmationTracker) reset(cardID int32) bool {
-	if _, exists := t.states[cardID]; !exists {
+func (t *confirmationTracker) reset(key confirmationKey) bool {
+	if _, exists := t.states[key]; !exists {
 		return false
 	}
-	delete(t.states, cardID)
+	delete(t.states, key)
 	return true
 }
 
 func (t *confirmationTracker) resetAll() int {
 	count := len(t.states)
-	t.states = make(map[int32]confirmationState)
+	t.states = make(map[confirmationKey]confirmationState)
 	return count
 }
 
-func (t *confirmationTracker) observe(cardID int32, now, candidateSince time.Time, grace time.Duration, confirmations int) bool {
-	state, exists := t.states[cardID]
+func (t *confirmationTracker) observe(key confirmationKey, now, candidateSince time.Time, grace time.Duration, confirmations int) bool {
+	state, exists := t.states[key]
 	if !exists {
 		state = confirmationState{firstSeen: now}
 	}
@@ -46,41 +53,35 @@ func (t *confirmationTracker) observe(cardID int32, now, candidateSince time.Tim
 		state.candidateSince = candidateSince
 	}
 	state.count++
-	t.states[cardID] = state
+	t.states[key] = state
+	return t.ready(key, now, grace, confirmations)
+}
+
+// recheckClaim updates an existing observation without counting another
+// hardware scan. It returns true if Pod protection reset the observation.
+func (t *confirmationTracker) recheckClaim(key confirmationKey, claim CardClaim) bool {
+	if claim.Protected() {
+		return t.reset(key)
+	}
+	state, exists := t.states[key]
+	if exists && claim.CandidateSince.After(state.candidateSince) {
+		state.candidateSince = claim.CandidateSince
+		t.states[key] = state
+	}
+	return false
+}
+
+func (t *confirmationTracker) ready(key confirmationKey, now time.Time, grace time.Duration, confirmations int) bool {
+	state, exists := t.states[key]
+	if !exists {
+		return false
+	}
 	if confirmations < 1 {
 		confirmations = 1
 	}
 	// Never let a stale candidateSince (for example, restored from an older
 	// snapshot after restart) shorten the current process's grace period.
 	// firstSeen is the lower safety bound and is initialized only once.
-	graceSince := state.firstSeen
-	if state.candidateSince.After(graceSince) {
-		graceSince = state.candidateSince
-	}
-	return state.count >= confirmations && now.Sub(graceSince) >= grace
-}
-
-func (t *confirmationTracker) updateCandidateSince(cardID int32, candidateSince time.Time) {
-	if candidateSince.IsZero() {
-		return
-	}
-	state, exists := t.states[cardID]
-	if !exists || state.candidateSince.IsZero() || candidateSince.After(state.candidateSince) {
-		state.candidateSince = candidateSince
-		t.states[cardID] = state
-	}
-}
-
-func (t *confirmationTracker) ready(cardID int32, now, candidateSince time.Time, grace time.Duration, confirmations int) bool {
-	state, exists := t.states[cardID]
-	if !exists {
-		return false
-	}
-	t.updateCandidateSince(cardID, candidateSince)
-	state = t.states[cardID]
-	if confirmations < 1 {
-		confirmations = 1
-	}
 	graceSince := state.firstSeen
 	if state.candidateSince.After(graceSince) {
 		graceSince = state.candidateSince

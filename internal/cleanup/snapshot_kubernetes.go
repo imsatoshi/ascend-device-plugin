@@ -38,6 +38,8 @@ type KubernetesPodSnapshot struct {
 	nodeName           string
 	clientset          kubernetes.Interface
 	resolver           DeviceResolver
+	wholeResource      string
+	sharedResource     string
 	podLister          corelisters.PodLister
 	podListerSynced    cache.InformerSynced
 	stopCh             chan struct{}
@@ -61,8 +63,8 @@ type checkpointStaleState struct {
 }
 
 type checkpointAllocation struct {
-	CardIDs   []int32
-	DeviceIDs map[string][]string
+	CardIDs  []int32
+	Unmapped bool
 }
 
 func NewKubernetesPodSnapshot(clientset kubernetes.Interface, nodeName string, resolver DeviceResolver, checkpointPath string) (*KubernetesPodSnapshot, error) {
@@ -101,6 +103,11 @@ func NewKubernetesPodSnapshot(clientset kubernetes.Interface, nodeName string, r
 		staleCheckpoint:    make(map[string]checkpointStaleState),
 		staleGrace:         defaultStaleCheckpointGrace,
 		staleConfirmations: defaultStaleCheckpointConfirmations,
+	}
+	if mixed := resolver.MixedDevices(); mixed != nil {
+		// The validated whole endpoint owns a disjoint hardware partition.
+		snapshot.wholeResource = mixed.WholeResource()
+		snapshot.sharedResource = resolver.ResourceName()
 	}
 	factory.Start(stopCh)
 	return snapshot, nil
@@ -143,11 +150,6 @@ func (s *KubernetesPodSnapshot) Snapshot(ctx context.Context) (AllocationSnapsho
 	if err != nil {
 		return result, err
 	}
-	checkpointUIDs := make(map[string]bool, len(checkpointAllocations))
-	for uid := range checkpointAllocations {
-		checkpointUIDs[uid] = true
-	}
-
 	podUIDs := make(map[string]struct{}, len(podList.Items))
 	for i := range podList.Items {
 		pod := &podList.Items[i]
@@ -175,22 +177,29 @@ func (s *KubernetesPodSnapshot) Snapshot(ctx context.Context) (AllocationSnapsho
 		if pod.Spec.NodeName != s.nodeName {
 			continue
 		}
-		if pod.UID == "" {
-			if podHasAscendResource(pod) {
+		uid := string(pod.UID)
+		allocation, checkpointed := checkpointAllocations[uid]
+		hasResource, uuids, parseErr := s.podDeviceUUIDs(pod)
+		if s.wholeResource != "" {
+			// A shared checkpoint entry or malformed allocation annotation is
+			// still ownership evidence on a Pod that requests whole dies.
+			hasResource = hasResource || checkpointed || parseErr != nil || len(uuids) > 0
+		}
+		if uid == "" {
+			if hasResource {
 				result.UnknownPodUIDs = append(result.UnknownPodUIDs, pod.Namespace+"/"+pod.Name)
 			}
 			continue
 		}
-		hasResource, uuids, parseErr := podDeviceUUIDs(pod)
 		if !hasResource && len(uuids) == 0 {
 			continue
 		}
-		if parseErr != nil || len(uuids) == 0 {
-			result.UnknownPodUIDs = append(result.UnknownPodUIDs, string(pod.UID))
+		if parseErr != nil || len(uuids) == 0 || allocation.Unmapped {
+			result.UnknownPodUIDs = append(result.UnknownPodUIDs, uid)
 			continue
 		}
 
-		state, reason, failingSince := classifyPod(pod, checkpointUIDs[string(pod.UID)])
+		state, reason, failingSince := classifyPod(pod, checkpointed)
 		if state == claimTerminal {
 			continue
 		}
@@ -201,7 +210,7 @@ func (s *KubernetesPodSnapshot) Snapshot(ctx context.Context) (AllocationSnapsho
 		for _, uuid := range uuids {
 			device := s.resolver.GetDeviceByUUID(uuid)
 			if device == nil {
-				result.UnknownPodUIDs = append(result.UnknownPodUIDs, string(pod.UID))
+				result.UnknownPodUIDs = append(result.UnknownPodUIDs, uid)
 				continue
 			}
 			claim := result.ClaimsByCard[device.CardID]
@@ -210,9 +219,9 @@ func (s *KubernetesPodSnapshot) Snapshot(ctx context.Context) (AllocationSnapsho
 			if state == claimCandidate && (claim.CandidateSince.IsZero() || failingSince.After(claim.CandidateSince)) {
 				claim.CandidateSince = failingSince
 			}
-			claim.PodUIDs = appendUnique(claim.PodUIDs, string(pod.UID))
+			claim.PodUIDs = appendUnique(claim.PodUIDs, uid)
 			claim.Evidence = append(claim.Evidence, ClaimEvidence{
-				PodUID:       string(pod.UID),
+				PodUID:       uid,
 				Namespace:    pod.Namespace,
 				PodName:      pod.Name,
 				State:        toClaimState(state),
@@ -222,6 +231,24 @@ func (s *KubernetesPodSnapshot) Snapshot(ctx context.Context) (AllocationSnapsho
 				FailingSince: failingSince,
 			})
 			result.ClaimsByCard[device.CardID] = claim
+		}
+		if s.wholeResource != "" {
+			// Kubelet slots identify a parent card. If the checkpoint also
+			// names a card outside this Pod's annotations, keep it protected.
+			for _, id := range allocation.CardIDs {
+				claim := result.ClaimsByCard[id]
+				if containsString(claim.PodUIDs, uid) {
+					continue
+				}
+				claim.CardID = id
+				claim.State = ClaimProtected
+				claim.PodUIDs = append(claim.PodUIDs, uid)
+				claim.Evidence = append(claim.Evidence, ClaimEvidence{
+					PodUID: uid, State: ClaimProtected, Source: "kubelet-checkpoint",
+					Reason: "shared checkpoint card is absent from Pod annotations",
+				})
+				result.ClaimsByCard[id] = claim
+			}
 		}
 	}
 	if len(result.UnknownPodUIDs) > 0 {
@@ -259,7 +286,7 @@ func (s *KubernetesPodSnapshot) observeStaleCheckpointUIDs(checkpointAllocations
 		state.count++
 		s.staleCheckpoint[uid] = state
 		if state.count < s.staleConfirmations || now.Sub(state.firstAbsent) < s.staleGrace {
-			if len(allocation.CardIDs) == 0 {
+			if len(allocation.CardIDs) == 0 || allocation.Unmapped {
 				unknown = append(unknown, uid)
 				continue
 			}
@@ -414,21 +441,25 @@ func appendUnique(values []string, value string) []string {
 	return append(values, value)
 }
 
-func podDeviceUUIDs(pod *corev1.Pod) (bool, []string, error) {
-	hasResource := podHasAscendResource(pod)
+func (s *KubernetesPodSnapshot) podDeviceUUIDs(pod *corev1.Pod) (bool, []string, error) {
+	hasResource := s.podHasAscendResource(pod)
+	sharedToAllocate := "hami.io/" + strings.TrimPrefix(s.sharedResource, "huawei.com/") + "-devices-to-allocate"
 	var uuids []string
 	var parseErr error
 	for key, value := range pod.Annotations {
-		if !strings.HasPrefix(key, "huawei.com/Ascend") && !strings.Contains(key, "-devices-to-allocate") {
+		if !s.tracksResource(key) && !strings.Contains(key, "-devices-to-allocate") {
 			continue
 		}
-		if strings.HasSuffix(key, "-memory") || strings.HasSuffix(key, "-core") {
+		if s.isAuxiliaryResource(key) {
 			continue
+		}
+		if s.sharedResource != "" && (key == s.sharedResource || key == sharedToAllocate) {
+			hasResource = true
 		}
 		if strings.TrimSpace(value) == "" {
 			continue
 		}
-		parsed, err := parseDeviceAnnotation(value)
+		parsed, err := parseDeviceAnnotation(value, s.wholeResource != "")
 		if err != nil {
 			parseErr = err
 			continue
@@ -438,12 +469,22 @@ func podDeviceUUIDs(pod *corev1.Pod) (bool, []string, error) {
 	return hasResource, uniqueStrings(uuids), parseErr
 }
 
-func podHasAscendResource(pod *corev1.Pod) bool {
+// Keep other Ascend claims fail-closed. Only the configured whole endpoint
+// is known to be disjoint from the shared manager's devices.
+func (s *KubernetesPodSnapshot) tracksResource(name string) bool {
+	return name != s.wholeResource && (name == s.sharedResource || strings.HasPrefix(name, "huawei.com/Ascend"))
+}
+
+func (s *KubernetesPodSnapshot) isAuxiliaryResource(name string) bool {
+	return name != s.sharedResource && (strings.HasSuffix(name, "-memory") || strings.HasSuffix(name, "-core"))
+}
+
+func (s *KubernetesPodSnapshot) podHasAscendResource(pod *corev1.Pod) bool {
 	for _, container := range append(append([]corev1.Container{}, pod.Spec.InitContainers...), pod.Spec.Containers...) {
 		for _, resources := range []corev1.ResourceList{container.Resources.Limits, container.Resources.Requests} {
 			for resource := range resources {
 				name := string(resource)
-				if strings.HasPrefix(name, "huawei.com/Ascend") && !strings.HasSuffix(name, "-core") && !strings.HasSuffix(name, "-memory") {
+				if s.tracksResource(name) && !s.isAuxiliaryResource(name) {
 					return true
 				}
 			}
@@ -452,13 +493,16 @@ func podHasAscendResource(pod *corev1.Pod) bool {
 	return false
 }
 
-func parseDeviceAnnotation(value string) ([]string, error) {
+func parseDeviceAnnotation(value string, requireUUID bool) ([]string, error) {
 	var runtimeInfos []struct {
 		UUID string `json:"UUID"`
 	}
 	if err := json.Unmarshal([]byte(value), &runtimeInfos); err == nil {
 		var uuids []string
 		for _, info := range runtimeInfos {
+			if requireUUID && strings.TrimSpace(info.UUID) == "" {
+				return nil, fmt.Errorf("device annotation contains an empty UUID")
+			}
 			if info.UUID != "" {
 				uuids = append(uuids, info.UUID)
 			}
@@ -529,15 +573,8 @@ func (s *KubernetesPodSnapshot) readCheckpointAllocations() (map[string]checkpoi
 	if checkpoint.Data == nil || checkpoint.Data.RegisteredDevices == nil || len(checkpoint.Data.PodDeviceEntries) == 0 {
 		return nil, fmt.Errorf("kubelet allocation checkpoint is uninitialized or unsupported")
 	}
-	registered := false
-	for resource, ids := range checkpoint.Data.RegisteredDevices {
-		if strings.HasPrefix(resource, "huawei.com/Ascend") && len(ids) > 0 {
-			registered = true
-			break
-		}
-	}
-	if !registered {
-		return nil, fmt.Errorf("kubelet allocation checkpoint has no registered Ascend devices")
+	if err := s.checkRegisteredDevices(checkpoint.Data.RegisteredDevices); err != nil {
+		return nil, err
 	}
 	var entries []struct {
 		PodUID       string
@@ -549,18 +586,36 @@ func (s *KubernetesPodSnapshot) readCheckpointAllocations() (map[string]checkpoi
 	}
 	allocations := make(map[string]checkpointAllocation, len(entries))
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.ResourceName, "huawei.com/Ascend") {
+		if !s.tracksResource(entry.ResourceName) {
 			continue
 		}
 		if entry.PodUID == "" {
 			return nil, fmt.Errorf("kubelet allocation checkpoint contains an empty Pod UID")
 		}
 		allocation := allocations[entry.PodUID]
-		allocation.CardIDs = appendUniqueInt32(allocation.CardIDs, s.checkpointCardIDs(entry.DeviceIDs)...)
-		allocation.DeviceIDs = entry.DeviceIDs
+		cards := s.checkpointCardIDs(entry.DeviceIDs)
+		if s.wholeResource != "" && len(cards) == 0 {
+			allocation.Unmapped = true
+		}
+		allocation.CardIDs = appendUniqueInt32(allocation.CardIDs, cards...)
 		allocations[entry.PodUID] = allocation
 	}
 	return allocations, nil
+}
+
+func (s *KubernetesPodSnapshot) checkRegisteredDevices(registered map[string][]string) error {
+	if s.wholeResource != "" {
+		if len(registered[s.sharedResource]) == 0 {
+			return fmt.Errorf("kubelet allocation checkpoint has no registered devices for %s", s.sharedResource)
+		}
+		return nil
+	}
+	for name, ids := range registered {
+		if strings.HasPrefix(name, "huawei.com/Ascend") && len(ids) > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("kubelet allocation checkpoint has no registered Ascend devices")
 }
 
 func (s *KubernetesPodSnapshot) checkpointCardIDs(deviceIDs map[string][]string) []int32 {
